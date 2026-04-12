@@ -1,0 +1,196 @@
+name: Pharma Cold-Chain Inventory Management Environment
+description: >
+  An OpenEnv-compliant environment for intelligent pharmaceutical warehouse procurement.
+  An LLM agent manages a cold-chain warehouse stocking four drugs across two storage pools
+  (refrigerated cold storage for insulin, ambient for the rest). Every day the agent receives
+  an inventory report and decides what to order, how much, and from which supplier.
+  Demand is stochastic and time-varying. Supplier lead times are uncertain and can extend
+  during disruption events. The agent never sees true demand or true lead times — it must
+  infer risk from observable history and act under uncertainty to maximise prescription fill
+  rate while minimising stockouts, waste, and budget overrun.
+version: "1.0.0"
+author: YourTeamName
+
+observation_space:
+  type: structured_json
+  description: >
+    A JSON daily inventory report containing three layers of information.
+    Layer 2 (historical insights): demand_last_3d, demand_last_7d, demand_trend,
+    stockout_days_if_no_reorder, coverage_gap_7d, prescription fill rates,
+    epidemic_alert_flag, days_since_epidemic_alert_fired, supplier on_time_rate_14d,
+    last_observed_lead_time, supply_disruption_days_last_30d.
+    Layer 3 (current real state): inventory_on_hand, backorders, inbound_expected_3d,
+    inbound_expected_7d, cold_storage and ambient capacity ratios and absolute values,
+    procurement_budget_ratio, cold_chain_integrity_flag, orders_overdue_count,
+    overdue_qty_total, supplier disruption_active flags.
+    Fixed domain parameters (always visible): stockout_penalty, substitute_coverage_ratio,
+    cold_storage_required per SKU, cold_chain_certified and sku_served per supplier.
+    Hidden (never shown): true demand today, true demand mean and std, true lead times,
+    disruption Markov chain states and transition probabilities, cold chain breach probability.
+
+action_space:
+  type: structured_json
+  description: >
+    A JSON object mapping SKU names to [quantity, supplier_name] pairs.
+    The agent orders only the SKUs it includes in the response.
+    Omitted SKUs receive no order today.
+    Example: {"insulin": [100, "FastPharma"], "paracetamol": [500, "GlobalMed"]}
+    An empty object {} means no orders today.
+  constraints:
+    - insulin can only be ordered from cold_chain_certified suppliers (FastPharma only)
+    - quantity must be a positive number
+    - order is rejected if procurement_budget_ratio cannot cover the cost
+    - order is rejected if relevant storage pool is at capacity
+    - order is rejected if the supplier is currently disrupted
+
+endpoints:
+  health: /
+  reset:  /reset
+  step:   /step
+  state:  /state
+
+tasks:
+  - id: supply_chain_broken_easy
+    description: >
+      Supply chain stress with a comfortable starting position.
+      GlobalMed lead times increase from day 25 (1.5x multiplier).
+      FastPharma is unaffected. GlobalMed goes offline for 5 days around day 40.
+      Demand rises only 10-15% — the challenge is entirely supply-side.
+      Agent starts with 14 days of cover per SKU.
+      Tests whether the agent learns to order more, earlier,
+      even when shelves look fine today.
+    difficulty: easy
+    duration_days: 60
+    key_challenge: "anticipatory ordering under mild lead time extension"
+
+  - id: supply_chain_broken_medium
+    description: >
+      Supply chain stress with a tight starting position.
+      GlobalMed lead times increase 2.5x from day 15. FastPharma 1.5x from day 19.
+      GlobalMed fully offline for 10 days from day 35 — orders rejected during this window.
+      Agent starts with only 7 days of cover.
+      The agent must build safety stock in the first 15 days before stress hits,
+      then survive the GlobalMed offline window using FastPharma at premium cost.
+    difficulty: medium
+    duration_days: 60
+    key_challenge: "safety stock build before dual-supplier stress, budget triage during offline window"
+
+  - id: supply_chain_broken_hard
+    description: >
+      Supply chain stress that begins almost immediately.
+      GlobalMed lead times increase 4x from day 8. FastPharma 2x from day 12.
+      GlobalMed offline for 15 days from day 25 — hits before agent has had time to stock.
+      Agent starts with only 4 days of cover.
+      Requires aggressive early ordering across all SKUs from the first observation.
+      Cold chain breach probability also elevated.
+    difficulty: hard
+    duration_days: 60
+    key_challenge: "immediate pre-emptive ordering with very limited preparation window"
+
+  - id: flu_season_easy
+    description: >
+      Flu season with late onset and mild amplitudes.
+      Paracetamol demand peaks at day 35 (2x baseline, wide wave).
+      Insulin demand spikes mildly at day 40.
+      Vitamins see a short panic-buying bump.
+      No supplier stress. Agent starts with 14 days of cover.
+      Tests whether the agent reads the epidemic_alert_flag and pre-stocks paracetamol
+      before the surge arrives.
+    difficulty: easy
+    duration_days: 60
+    key_challenge: "read demand trend signals and pre-stock before peak"
+
+  - id: flu_season_medium
+    description: >
+      Flu season with mid-episode onset and significant demand amplitudes.
+      Paracetamol demand peaks at day 25 (2.5x baseline).
+      Insulin demand spikes sharply at day 30 (1.5x) — both critical SKUs stressed together.
+      GlobalMed lead times increase 1.8x from day 23 (logistics workers sick).
+      Agent starts with 7 days of cover.
+      Budget is tight — insulin has no substitute, must be protected first.
+      Tests triage reasoning under simultaneous demand and supply stress.
+    difficulty: medium
+    duration_days: 60
+    key_challenge: "insulin vs paracetamol budget triage during overlapping peak and supply stress"
+
+  - id: flu_season_hard
+    description: >
+      Flu season hits fast with very high amplitudes.
+      Paracetamol demand peaks at day 18 (3.2x baseline).
+      Insulin spike at day 23 (1.8x). Overlap creates maximum budget pressure.
+      GlobalMed slows from day 11 — before the peak, limiting response options.
+      Agent starts with only 4 days of cover.
+      Any delay in recognising the epidemic alert leads to stockout before peak.
+    difficulty: hard
+    duration_days: 60
+    key_challenge: "immediate response to epidemic signal with almost no buffer stock"
+
+  - id: epidemic_two_wave_easy
+    description: >
+      Two-wave epidemic. Primary drug: Hydroxychloroquine (HCQ).
+      Wave 1 peaks at day 17 (amplitude 1.2x above baseline = 2.2x total).
+      Wave 2 peaks at day 45 and is smaller than wave 1 (amplitude 1.0x = 2.0x total).
+      Lead time stress comes AFTER each peak — easier to react.
+      Agent starts with 14 days of cover.
+      Tests whether the agent can pre-stock HCQ before day 17 and avoid panic-ordering.
+    difficulty: easy
+    duration_days: 60
+    key_challenge: "pre-stock HCQ before wave 1, don't over-order during trough"
+
+  - id: epidemic_two_wave_medium
+    description: >
+      Two-wave epidemic. Wave 1 peaks at day 17 (amplitude 1.8x = 2.8x total).
+      Wave 2 peaks at day 45 and is LARGER than wave 1 (amplitude 2.5x = 3.5x total).
+      GlobalMed lead times increase 2x around wave 1 peak and 3x around wave 2 peak.
+      FastPharma gets slight stress during wave 2.
+      Agent starts with 7 days of cover.
+      The trough between waves is a trap — wave 2 is larger, must keep ordering.
+      Tests multi-wave reasoning: act before wave 1, don't relax in the trough.
+    difficulty: medium
+    duration_days: 60
+    key_challenge: "two-wave reasoning — wave 2 is larger, trough is a trap"
+
+  - id: epidemic_two_wave_hard
+    description: >
+      Two-wave epidemic with very high amplitudes and narrow wave shapes.
+      Wave 1 peaks at day 17 (amplitude 2.5x = 3.5x total demand).
+      Wave 2 peaks at day 45 (amplitude 3.5x = 4.5x total demand).
+      Lead time stress hits BEFORE each peak — orders placed at the peak arrive too late.
+      FastPharma also stressed during wave 2. Agent starts with only 4 days of cover.
+      Requires anticipatory ordering 5+ days before each peak under severe lead time extension.
+    difficulty: hard
+    duration_days: 60
+    key_challenge: "anticipate both wave peaks, order before lead time stress hits, survive trough"
+
+scoring:
+  reward_range: [0.01, 0.99]
+  success_threshold: 0.80
+
+  step_reward_formula: >
+    step_reward = clamp(
+        0.50 * prescription_fill_rate_7d
+      + 0.30 * critical_sku_fill_rate
+      + 0.10 * (1 - mean_expiry_pressure)
+      + 0.10 * procurement_budget_ratio,
+      0.01, 0.99
+    )
+    where critical_sku_fill_rate = mean fill rate for insulin and bp_medication only,
+    computed as 1 - (backorders / demand_last_7d) per critical SKU.
+
+  final_score_formula: >
+    final_score = clamp(
+        0.5 * mean(step_rewards)
+      + 0.3 * prescription_fill_rate_30d
+      + 0.2 * (1 - total_backorder_ratio),
+      0.01, 0.99
+    )
+    where total_backorder_ratio = total_backorders / total_demand_last_30d.
+    mean(step_rewards) captures decision quality throughout the episode.
+    prescription_fill_rate_30d captures end-of-episode service level.
+    (1 - backorder_ratio) captures whether accumulated debt was resolved.
+
+constraints:
+  max_runtime_seconds: 1200
+  max_memory_gb: 4
+  max_steps_per_task: 60
+  episode_length_days: 60
