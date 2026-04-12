@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from math import exp
 from random import Random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,13 +11,11 @@ from openenv.core.env_server.types import State
 
 try:
     from models import InventoryState, PharmaAction, SKUState, SupplierState
+    from tasks import compute_step_reward          # FIX 7: import real reward fn
 except ImportError:
     from models import InventoryState, PharmaAction, SKUState, SupplierState
+    from tasks import compute_step_reward
 
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """You are an intelligent pharmaceutical warehouse procurement agent.
 
@@ -96,40 +93,19 @@ Rules:
 """
 
 
-# ---------------------------------------------------------------------------
-# PharmaEnvironment
-# ---------------------------------------------------------------------------
-
 class PharmaEnvironment(Environment):
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
-
-    # -----------------------------------------------------------------------
-    # Construction
-    # -----------------------------------------------------------------------
 
     def __init__(self, inventory_state: InventoryState | None = None) -> None:
         super().__init__()
         self._inventory_state: Optional[InventoryState] = inventory_state
         self._step_count: int = 0
         self._episode_id: str = str(uuid.uuid4()) if inventory_state is not None else ""
-
-        # Hidden simulation state — never exposed to agent
         self._hidden: Dict[str, Any] = {}
-
-        # Demand history per SKU for rolling window computations
-        # {sku_id: [demand_day_0, demand_day_1, ...]}
         self._demand_history: Dict[str, List[float]] = {}
-
-        # Open purchase orders
-        # Each entry: {sku_id, supplier_id, qty, expected_arrival_day, placed_day}
         self._open_orders: List[Dict[str, Any]] = []
-
-        # Delivery history per supplier for on_time_rate computation
-        # {supplier_id: [(was_on_time: bool), ...]}
         self._delivery_history: Dict[str, List[bool]] = {}
-
-        # Random number generator
         self._rng: Optional[Random] = None
 
     # -----------------------------------------------------------------------
@@ -142,25 +118,6 @@ class PharmaEnvironment(Environment):
         episode_id: Optional[str] = None,
         **kwargs: Any,
     ) -> InventoryState:
-        """
-        Start a fresh episode.
-
-        Parameters
-        ----------
-        seed : int, optional
-            Random seed for reproducibility.
-        episode_id : str, optional
-            Identifier for this episode run.
-        kwargs : dict
-            task_config : dict
-                Full task configuration produced by a task constructor.
-                If not provided, a default baseline config is used.
-
-        Returns
-        -------
-        InventoryState
-            Initial state — the first daily inventory report.
-        """
         self._rng = Random(seed)
         self._episode_id = episode_id or str(uuid.uuid4())
         self._step_count = 0
@@ -170,7 +127,6 @@ class PharmaEnvironment(Environment):
 
         task_config = kwargs.get("task_config", self._default_task_config())
 
-        # -- Build hidden simulation state ----------------------------------
         self._hidden = {
             "duration_days":      task_config["duration_days"],
             "base_demands":       task_config["base_demands"],
@@ -178,14 +134,8 @@ class PharmaEnvironment(Environment):
             "supplier_stress":    task_config["supplier_stress"],
             "total_budget":       task_config["total_budget"],
             "remaining_budget":   task_config["total_budget"],
-
-            # True supplier lead time parameters (never shown to agent)
             "supplier_params":    task_config["supplier_params"],
-
-            # Cold chain breach probability per day
             "cold_chain_breach_prob": task_config.get("cold_chain_breach_prob", 0.005),
-
-            # Disruption Markov chain state per supplier
             "disruption_state": {
                 s: False for s in task_config["supplier_params"]
             },
@@ -195,16 +145,17 @@ class PharmaEnvironment(Environment):
             }),
         }
 
-        # -- Initialise demand history with zeros ---------------------------
         for sku_id in task_config["base_demands"]:
             self._demand_history[sku_id] = [0.0] * 7
 
         for supplier_id in task_config["supplier_params"]:
             self._delivery_history[supplier_id] = []
 
-        # -- Build InventoryState -------------------------------------------
+        # FIX 1: removed self._reset_rubric() — that method does not exist
+        # in PharmaEnvironment (it existed in the ETL pipeline env and was
+        # accidentally carried over). Calling it caused AttributeError on
+        # every reset().
         self._inventory_state = self._build_initial_state(task_config)
-
         return self._inventory_state
 
     # -----------------------------------------------------------------------
@@ -215,33 +166,6 @@ class PharmaEnvironment(Environment):
         timeout_s: Optional[float] = None,
         **kwargs: Any,
     ) -> InventoryState:
-        """
-        Execute one day's procurement action and advance the simulation by one day.
-
-        Order of operations per day:
-        1. Parse and validate the agent's orders.
-        2. Place valid orders (added to open order pipeline).
-        3. Advance simulation by one day:
-            a. Sample true demand from hidden process.
-            b. Consume inventory (reduce on-hand, create backorders if needed).
-            c. Process inbound arrivals (orders whose lead time has elapsed).
-            d. Update disruption Markov chains.
-            e. Possibly trigger cold chain breach.
-        4. Update all observable Layer 2 and Layer 3 signals.
-        5. Compute reward.
-        6. Check terminal condition.
-        7. Return updated InventoryState.
-
-        Parameters
-        ----------
-        action : PharmaAction
-            Agent's procurement decision for today.
-
-        Returns
-        -------
-        InventoryState
-            Updated daily inventory report for the next decision.
-        """
         ts = self._inventory_state
         if ts is None:
             raise RuntimeError("reset() must be called before step().")
@@ -252,44 +176,36 @@ class PharmaEnvironment(Environment):
         day = ts.current_date
         feedback_parts: List[str] = []
 
-        # -- Step 1+2: Parse and place orders --------------------------------
         orders = self._parse_action(action)
         order_feedback = self._place_orders(orders, day)
         feedback_parts.extend(order_feedback)
 
-        # -- Step 3a: Sample true demand ------------------------------------
         true_demands = self._sample_true_demand(day)
-
-        # -- Step 3b: Consume inventory -------------------------------------
         consumption_feedback = self._consume_inventory(true_demands)
         feedback_parts.extend(consumption_feedback)
 
-        # -- Step 3c: Process inbound arrivals ------------------------------
         arrival_feedback = self._process_arrivals(day)
         feedback_parts.extend(arrival_feedback)
 
-        # -- Step 3d: Update disruption states ------------------------------
         self._update_disruptions(day)
 
-        # -- Step 3e: Cold chain breach check --------------------------------
         breach_feedback = self._check_cold_chain_breach()
         if breach_feedback:
             feedback_parts.append(breach_feedback)
 
-        # -- Step 4: Update observable signals ------------------------------
         self._update_demand_history(true_demands)
         self._update_layer2_signals(day)
         self._update_layer3_signals()
         self._update_overdue_orders(day)
 
-        # -- Advance date ---------------------------------------------------
         ts.current_date = day + 1
         ts.season_phase = ts.current_date / self._hidden["duration_days"]
 
-        # -- Step 5: Compute reward (placeholder — reward fn injected later) -
-        ts.reward = self._compute_reward(true_demands)
+        # FIX 2: replaced self._compute_reward(true_demands) — that method
+        # was a placeholder returning 0.0 always. Now calls compute_step_reward()
+        # imported from tasks.py, which uses the actual formula.
+        ts.reward = compute_step_reward(ts)
 
-        # -- Step 6: Terminal check -----------------------------------------
         if ts.current_date >= self._hidden["duration_days"]:
             ts.done = True
             feedback_parts.append(
@@ -298,47 +214,38 @@ class PharmaEnvironment(Environment):
             )
 
         ts.last_action_feedback = " | ".join(feedback_parts) if feedback_parts else "Day processed."
-
         return ts
 
     # -----------------------------------------------------------------------
 
     @property
     def state(self) -> State:
-        return State(
-            episode_id=self._episode_id,
-            step_count=self._step_count,
-        )
+        return State(episode_id=self._episode_id, step_count=self._step_count)
 
     # -----------------------------------------------------------------------
-    # Reset helper — build initial InventoryState
+    # Reset helper
     # -----------------------------------------------------------------------
 
     def _build_initial_state(self, task_config: Dict[str, Any]) -> InventoryState:
-        """Construct the full InventoryState at episode start."""
-
-        # -- Build per-SKU states -------------------------------------------
         skus: Dict[str, SKUState] = {}
         for sku_id, sku_cfg in task_config["sku_configs"].items():
             skus[sku_id] = SKUState(
-                sku_id                   = sku_id,
-                name                     = sku_cfg["name"],
-                cold_storage_required    = sku_cfg["cold_storage_required"],
-                stockout_penalty         = sku_cfg["stockout_penalty"],
-                substitute_coverage_ratio= sku_cfg.get("substitute_coverage_ratio", 0.0),
-                inventory_on_hand        = task_config["starting_inventory"][sku_id],
-                # Layer 2 starts at zero — no history yet
-                demand_last_3d           = 0.0,
-                demand_last_7d           = 0.0,
-                demand_trend             = 0.0,
+                sku_id                    = sku_id,
+                name                      = sku_cfg["name"],
+                cold_storage_required     = sku_cfg["cold_storage_required"],
+                stockout_penalty          = sku_cfg["stockout_penalty"],
+                substitute_coverage_ratio = sku_cfg.get("substitute_coverage_ratio", 0.0),
+                inventory_on_hand         = task_config["starting_inventory"][sku_id],
+                demand_last_3d            = 0.0,
+                demand_last_7d            = 0.0,
+                demand_trend              = 0.0,
                 stockout_days_if_no_reorder = 999.0,
-                coverage_gap_7d          = 0.0,
-                inbound_expected_3d      = 0.0,
-                inbound_expected_7d      = 0.0,
-                backorders               = 0.0,
+                coverage_gap_7d           = 0.0,
+                inbound_expected_3d       = 0.0,
+                inbound_expected_7d       = 0.0,
+                backorders                = 0.0,
             )
 
-        # -- Build per-supplier states --------------------------------------
         suppliers: Dict[str, SupplierState] = {}
         for sup_id, sup_cfg in task_config["supplier_configs"].items():
             suppliers[sup_id] = SupplierState(
@@ -353,17 +260,10 @@ class PharmaEnvironment(Environment):
                 disruption_active        = False,
             )
 
-        # -- Compute initial capacity values --------------------------------
-        cold_used = sum(
-            skus[s].inventory_on_hand
-            for s in skus if skus[s].cold_storage_required
-        )
-        ambient_used = sum(
-            skus[s].inventory_on_hand
-            for s in skus if not skus[s].cold_storage_required
-        )
+        cold_used    = sum(s.inventory_on_hand for s in skus.values() if s.cold_storage_required)
+        ambient_used = sum(s.inventory_on_hand for s in skus.values() if not s.cold_storage_required)
 
-        state = InventoryState(
+        return InventoryState(
             current_date                    = 0,
             season_phase                    = 0.0,
             prescription_fill_rate_30d      = 1.0,
@@ -387,22 +287,14 @@ class PharmaEnvironment(Environment):
             reward                          = 0.0,
         )
 
-        return state
-
     # -----------------------------------------------------------------------
     # Action handling
     # -----------------------------------------------------------------------
 
     def _parse_action(self, action: PharmaAction) -> Dict[str, Tuple[float, str]]:
-        """
-        Extract orders from PharmaAction.
-        Tries action.orders first, then falls back to parsing action.message.
-        Returns {sku_id: (quantity, supplier_id)}.
-        """
         if action.orders:
             return action.orders
 
-        # Fallback: parse JSON from message string
         try:
             raw = re.search(r"\{.*\}", action.message, re.DOTALL)
             if raw:
@@ -424,35 +316,25 @@ class PharmaEnvironment(Environment):
         orders: Dict[str, Tuple[float, str]],
         day: int,
     ) -> List[str]:
-        """
-        Validate and place purchase orders.
-        Returns feedback strings for each order attempt.
-        """
         ts = self._inventory_state
         feedback: List[str] = []
 
         for sku_id, (qty, supplier_id) in orders.items():
 
-            # -- Validate SKU exists ----------------------------------------
             sku = ts.get_sku(sku_id)
             if sku is None:
                 feedback.append(f"Order rejected: unknown SKU '{sku_id}'.")
                 continue
 
-            # -- Validate supplier exists -----------------------------------
             supplier = ts.get_supplier(supplier_id)
             if supplier is None:
                 feedback.append(f"Order rejected: unknown supplier '{supplier_id}'.")
                 continue
 
-            # -- Validate supplier serves this SKU --------------------------
             if sku_id not in supplier.sku_served:
-                feedback.append(
-                    f"Order rejected: '{supplier_id}' does not serve '{sku_id}'."
-                )
+                feedback.append(f"Order rejected: '{supplier_id}' does not serve '{sku_id}'.")
                 continue
 
-            # -- Validate cold chain constraint for insulin -----------------
             if sku.cold_storage_required and not supplier.cold_chain_certified:
                 feedback.append(
                     f"Order rejected: '{sku_id}' requires cold chain — "
@@ -460,21 +342,30 @@ class PharmaEnvironment(Environment):
                 )
                 continue
 
-            # -- Validate disruption ----------------------------------------
             if supplier.disruption_active:
+                feedback.append(f"Order rejected: '{supplier_id}' is currently disrupted.")
+                continue
+
+            # FIX 5: compute stress BEFORE placing the order so we can check
+            # for the offline condition (stress >= 100). Previously stress was
+            # computed only at the very bottom of this loop and was never used
+            # to gate the order — a supplier marked offline in the task config
+            # via stress=999 would still accept orders and just produce a
+            # lead time of ~999 days, which is silently wrong.
+            stress_mult = self._hidden["supplier_stress"].get(supplier_id, [1.0] * 100)
+            stress = stress_mult[min(day, len(stress_mult) - 1)]
+            if stress >= 100.0:
                 feedback.append(
-                    f"Order rejected: '{supplier_id}' is currently disrupted."
+                    f"Order rejected: '{supplier_id}' is currently offline "
+                    f"(supply chain failure — check back in a few days)."
                 )
                 continue
 
-            # -- Validate quantity ------------------------------------------
             if qty <= 0:
                 feedback.append(f"Order rejected: quantity must be positive for '{sku_id}'.")
                 continue
 
-            # -- Validate budget --------------------------------------------
             order_cost = qty * supplier.unit_cost
-            total_budget = self._hidden["total_budget"]
             remaining_budget = self._hidden["remaining_budget"]
             if order_cost > remaining_budget:
                 feedback.append(
@@ -483,54 +374,43 @@ class PharmaEnvironment(Environment):
                 )
                 continue
 
-            # -- Validate capacity ------------------------------------------
             if sku.cold_storage_required:
-                available_cold = (
-                    ts.cold_storage_total_capacity - ts.cold_storage_current_capacity
-                )
-                if qty > available_cold:
+                available = ts.cold_storage_total_capacity - ts.cold_storage_current_capacity
+                if qty > available:
                     feedback.append(
                         f"Order rejected: '{sku_id}' needs {qty} cold storage units, "
-                        f"only {available_cold:.1f} available."
+                        f"only {available:.1f} available."
                     )
                     continue
             else:
-                available_ambient = (
-                    ts.ambient_storage_total_capacity - ts.ambient_storage_current_capacity
-                )
-                if qty > available_ambient:
+                available = ts.ambient_storage_total_capacity - ts.ambient_storage_current_capacity
+                if qty > available:
                     feedback.append(
                         f"Order rejected: '{sku_id}' needs {qty} ambient units, "
-                        f"only {available_ambient:.1f} available."
+                        f"only {available:.1f} available."
                     )
                     continue
 
-            # -- Place order -------------------------------------------------
-            # Sample true lead time from hidden parameters (agent does not see this)
+            # Place the order.
+            # FIX 6 (minor): removed dead `day_idx` variable that was computed
+            # here but never referenced anywhere in the method.
             params = self._hidden["supplier_params"][supplier_id]
-            day_idx = min(day, len(self._hidden["demand_curves"].get(sku_id, [1.0])) - 1)
-            stress_mult = self._hidden["supplier_stress"].get(supplier_id, [1.0] * 100)
-            stress = stress_mult[min(day, len(stress_mult) - 1)]
-
-            true_lead_time = max(1, self._rng.gauss(
+            true_lead_time = max(1, round(self._rng.gauss(
                 params["lead_time_mean"] * stress,
                 params["lead_time_std"] * stress,
-            ))
-            true_lead_time = round(true_lead_time)
-
+            )))
             expected_arrival_day = day + round(supplier.last_observed_lead_time * stress)
 
             self._open_orders.append({
                 "sku_id":               sku_id,
                 "supplier_id":          supplier_id,
                 "qty":                  qty,
-                "true_arrival_day":     day + true_lead_time,   # hidden
-                "expected_arrival_day": expected_arrival_day,    # observable
+                "true_arrival_day":     day + true_lead_time,
+                "expected_arrival_day": expected_arrival_day,
                 "placed_day":           day,
                 "expedited":            False,
             })
 
-            # Deduct budget
             self._hidden["remaining_budget"] -= order_cost
             ts.procurement_budget_ratio = (
                 self._hidden["remaining_budget"] / self._hidden["total_budget"]
@@ -548,11 +428,6 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _sample_true_demand(self, day: int) -> Dict[str, float]:
-        """
-        Sample true demand for each SKU today.
-        Uses hidden demand_curves and base_demands.
-        Result is NOT shown to agent — only its inventory consequences are visible.
-        """
         true_demands: Dict[str, float] = {}
         curves = self._hidden["demand_curves"]
         base   = self._hidden["base_demands"]
@@ -561,7 +436,7 @@ class PharmaEnvironment(Environment):
             curve  = curves.get(sku_id, [1.0] * 100)
             idx    = min(day, len(curve) - 1)
             mean   = base_demand * curve[idx]
-            std    = mean * 0.15  # 15% coefficient of variation
+            std    = mean * 0.15
             demand = max(0.0, self._rng.gauss(mean, std))
             true_demands[sku_id] = demand
 
@@ -570,10 +445,6 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _consume_inventory(self, true_demands: Dict[str, float]) -> List[str]:
-        """
-        Reduce inventory by true demand. Create backorders if insufficient stock.
-        Returns feedback strings for stockout events.
-        """
         ts = self._inventory_state
         feedback: List[str] = []
 
@@ -585,7 +456,6 @@ class PharmaEnvironment(Environment):
             if sku.inventory_on_hand >= demand:
                 sku.inventory_on_hand -= demand
             else:
-                # Partial fill — remaining demand becomes backorder
                 unmet = demand - sku.inventory_on_hand
                 sku.inventory_on_hand = 0.0
                 sku.backorders += unmet
@@ -594,9 +464,7 @@ class PharmaEnvironment(Environment):
                     f"added to backorders (total: {sku.backorders:.1f})."
                 )
 
-        # Update capacity after consumption
         self._recompute_storage_usage()
-
         return feedback
 
     # -----------------------------------------------------------------------
@@ -606,7 +474,22 @@ class PharmaEnvironment(Environment):
     def _process_arrivals(self, day: int) -> List[str]:
         """
         Check open orders for arrivals today (true_arrival_day <= day).
-        Add arrived stock to inventory. Update supplier delivery history.
+
+        FIX 3: Fixed backorder double-counting bug.
+
+        Original code:
+            sku.inventory_on_hand += order["qty"]       # add all to shelf
+            cleared = min(sku.backorders, order["qty"])
+            sku.backorders -= cleared                   # also clear backorders
+
+        The units used to clear backorders were added to on_hand AND used to
+        satisfy demand — the same units were counted twice. on_hand was
+        overstated by exactly `cleared` units after every arrival against
+        existing backorders.
+
+        Correct logic: arriving units first satisfy backorders (those patients
+        get their prescriptions filled immediately); only the remainder goes
+        to the shelf.
         """
         ts = self._inventory_state
         feedback: List[str] = []
@@ -614,26 +497,26 @@ class PharmaEnvironment(Environment):
 
         for order in self._open_orders:
             if order["true_arrival_day"] <= day:
-                # Order arrives today
                 sku = ts.get_sku(order["sku_id"])
                 if sku is None:
                     continue
 
-                sku.inventory_on_hand += order["qty"]
+                arriving = order["qty"]
 
-                # First try to clear backorders with new stock
+                # Units first fill backorders; remainder goes to shelf.
                 if sku.backorders > 0:
-                    cleared = min(sku.backorders, order["qty"])
-                    sku.backorders = max(0.0, sku.backorders - cleared)
+                    cleared = min(sku.backorders, arriving)
+                    sku.backorders  -= cleared
+                    arriving        -= cleared  # these went to patients, not shelf
 
-                # Update supplier delivery history
-                was_on_time = order["true_arrival_day"] <= order["expected_arrival_day"]
+                sku.inventory_on_hand += arriving  # only the remainder lands on shelf
+
                 sup_id = order["supplier_id"]
+                was_on_time = order["true_arrival_day"] <= order["expected_arrival_day"]
                 if sup_id not in self._delivery_history:
                     self._delivery_history[sup_id] = []
                 self._delivery_history[sup_id].append(was_on_time)
 
-                # Update last_observed_lead_time for this supplier
                 supplier = ts.get_supplier(sup_id)
                 if supplier:
                     actual_lead = order["true_arrival_day"] - order["placed_day"]
@@ -648,7 +531,6 @@ class PharmaEnvironment(Environment):
 
         self._open_orders = still_open
         self._recompute_storage_usage()
-
         return feedback
 
     # -----------------------------------------------------------------------
@@ -656,14 +538,9 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _update_disruptions(self, day: int) -> None:
-        """
-        Advance the Markov disruption chain for each supplier.
-        Updates supplier.disruption_active based on hidden state transitions.
-        """
         ts = self._inventory_state
         params = self._hidden["disruption_params"]
         state  = self._hidden["disruption_state"]
-
         total_disrupted_days = 0
 
         for sup_id in state:
@@ -671,27 +548,17 @@ class PharmaEnvironment(Environment):
             currently_disrupted = state[sup_id]
 
             if currently_disrupted:
-                # Stay disrupted with probability p_persist
-                if self._rng.random() < p["p_persist"]:
-                    state[sup_id] = True
-                    total_disrupted_days += 1
-                else:
-                    state[sup_id] = False
-                    total_disrupted_days += 1
+                state[sup_id] = self._rng.random() < p["p_persist"]
+                total_disrupted_days += 1
             else:
-                # Enter disruption with probability p_onset
-                if self._rng.random() < p["p_onset"]:
-                    state[sup_id] = True
+                state[sup_id] = self._rng.random() < p["p_onset"]
+                if state[sup_id]:
                     total_disrupted_days += 1
-                else:
-                    state[sup_id] = False
 
-            # Update observable disruption_active (agent sees this AFTER it fires)
             supplier = ts.get_supplier(sup_id)
             if supplier:
                 supplier.disruption_active = state[sup_id]
 
-        # Update rolling disruption history
         ts.supply_disruption_days_last_30d = min(
             30, ts.supply_disruption_days_last_30d + total_disrupted_days
         )
@@ -701,14 +568,8 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _check_cold_chain_breach(self) -> Optional[str]:
-        """
-        Possibly trigger a cold chain breach.
-        If breach fires, destroy all insulin inventory.
-        """
         ts = self._inventory_state
-        p_breach = self._hidden["cold_chain_breach_prob"]
-
-        if self._rng.random() < p_breach:
+        if self._rng.random() < self._hidden["cold_chain_breach_prob"]:
             insulin = ts.get_sku("insulin")
             if insulin and insulin.inventory_on_hand > 0:
                 destroyed = insulin.inventory_on_hand
@@ -729,99 +590,56 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _update_demand_history(self, true_demands: Dict[str, float]) -> None:
-        """Append today's true demand to rolling history."""
         for sku_id, demand in true_demands.items():
             if sku_id not in self._demand_history:
                 self._demand_history[sku_id] = []
             self._demand_history[sku_id].append(demand)
 
-    # -----------------------------------------------------------------------
-
     def _update_layer2_signals(self, day: int) -> None:
-        """
-        Recompute all Layer 2 insight signals from observable history.
-        Called after demand history is updated.
-        """
         ts = self._inventory_state
 
         for sku_id, sku in ts.skus.items():
             history = self._demand_history.get(sku_id, [])
-
-            # Rolling demand windows from observable history
-            sku.demand_last_3d = float(sum(history[-3:])) if len(history) >= 1 else 0.0
-            sku.demand_last_7d = float(sum(history[-7:])) if len(history) >= 1 else 0.0
-
-            # Recompute all derived insight signals
+            sku.demand_last_3d = float(sum(history[-3:])) if history else 0.0
+            sku.demand_last_7d = float(sum(history[-7:])) if history else 0.0
             ts.update_sku_insights(sku_id)
 
-        # Update supplier on_time_rate from delivery history
         for sup_id, supplier in ts.suppliers.items():
-            deliveries = self._delivery_history.get(sup_id, [])
-            recent = deliveries[-14:]  # last 14 deliveries
+            recent = self._delivery_history.get(sup_id, [])[-14:]
             if recent:
                 supplier.on_time_rate_14d = sum(recent) / len(recent)
 
-        # Update prescription fill rates
         self._update_fill_rates(day)
-
-        # Update epidemic alert
         self._update_epidemic_alert()
 
-    # -----------------------------------------------------------------------
-
     def _update_layer3_signals(self) -> None:
-        """
-        Recompute Layer 3 real-state signals.
-        Called after arrivals and consumption are processed.
-        """
         ts = self._inventory_state
 
-        # Recompute inbound expected per SKU
         for sku_id, sku in ts.skus.items():
-            inbound_3d = sum(
+            sku.inbound_expected_3d = sum(
                 o["qty"] for o in self._open_orders
                 if o["sku_id"] == sku_id
                 and o["expected_arrival_day"] <= ts.current_date + 3
             )
-            inbound_7d = sum(
+            sku.inbound_expected_7d = sum(
                 o["qty"] for o in self._open_orders
                 if o["sku_id"] == sku_id
                 and o["expected_arrival_day"] <= ts.current_date + 7
             )
-            sku.inbound_expected_3d = inbound_3d
-            sku.inbound_expected_7d = inbound_7d
 
-        # Recompute capacity ratios
         ts.update_capacity_ratios()
 
-    # -----------------------------------------------------------------------
-
     def _update_overdue_orders(self, day: int) -> None:
-        """
-        Count orders past their expected arrival date.
-        Updates orders_overdue_count and overdue_qty_total.
-        """
         ts = self._inventory_state
-        overdue = [
-            o for o in self._open_orders
-            if o["expected_arrival_day"] < day
-        ]
+        overdue = [o for o in self._open_orders if o["expected_arrival_day"] < day]
         ts.orders_overdue_count = len(overdue)
         ts.overdue_qty_total    = float(sum(o["qty"] for o in overdue))
 
-    # -----------------------------------------------------------------------
-
     def _update_fill_rates(self, day: int) -> None:
-        """
-        Recompute prescription fill rates from backorder and demand history.
-        Uses a rolling window approach.
-        """
         ts = self._inventory_state
-
         if day == 0:
             return
 
-        # Approximate fill rate: 1 - (backorders / total_demand_in_window)
         total_demand_7d  = 0.0
         total_demand_30d = 0.0
         total_backorders = 0.0
@@ -841,25 +659,16 @@ class PharmaEnvironment(Environment):
                 0.0, 1.0 - (total_backorders / total_demand_30d)
             )
 
-    # -----------------------------------------------------------------------
-
     def _update_epidemic_alert(self) -> None:
-        """
-        Fire epidemic_alert_flag when observed demand trend crosses threshold.
-        Based on observable history only — not hidden epidemic state.
-        Threshold: any SKU's 3-day average exceeds 14-day average by 40%.
-        """
         ts = self._inventory_state
         alert_triggered = False
 
-        for sku_id, sku in ts.skus.items():
+        for sku_id in ts.skus:
             history = self._demand_history.get(sku_id, [])
             if len(history) < 7:
                 continue
-
             avg_3d  = sum(history[-3:]) / 3.0
             avg_14d = sum(history[-14:]) / min(14, len(history))
-
             if avg_14d > 0 and avg_3d > avg_14d * 1.40:
                 alert_triggered = True
                 break
@@ -879,57 +688,27 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _recompute_storage_usage(self) -> None:
-        """Recompute cold and ambient storage current usage from SKU inventories."""
         ts = self._inventory_state
-
-        cold_used = sum(
-            sku.inventory_on_hand
-            for sku in ts.skus.values()
-            if sku.cold_storage_required
+        ts.cold_storage_current_capacity    = sum(
+            s.inventory_on_hand for s in ts.skus.values() if s.cold_storage_required
         )
-        ambient_used = sum(
-            sku.inventory_on_hand
-            for sku in ts.skus.values()
-            if not sku.cold_storage_required
+        ts.ambient_storage_current_capacity = sum(
+            s.inventory_on_hand for s in ts.skus.values() if not s.cold_storage_required
         )
-
-        ts.cold_storage_current_capacity    = cold_used
-        ts.ambient_storage_current_capacity = ambient_used
         ts.update_capacity_ratios()
-
-    # -----------------------------------------------------------------------
-    # Reward (placeholder — real reward injected from tasks module)
-    # -----------------------------------------------------------------------
-
-    def _compute_reward(self, true_demands: Dict[str, float]) -> float:
-        """
-        Placeholder reward. Returns 0.0.
-        Real reward function injected from tasks module.
-        """
-        return 0.0
 
     # -----------------------------------------------------------------------
     # LLM interface
     # -----------------------------------------------------------------------
 
     def to_llm_prompt(self) -> str:
-        """
-        Build the full prompt sent to the LLM for today's procurement decision.
-
-        Returns system prompt + current daily inventory report as JSON.
-        Agent sees only Layer 2 and Layer 3 signals.
-        """
         if self._inventory_state is None:
             return _SYSTEM_PROMPT + "\n\nNo state available. Call reset() first."
 
         ts = self._inventory_state
-
-        # -- Build agent-visible state dict ---------------------------------
         state_dict = {
             "day":          ts.current_date,
             "season_phase": round(ts.season_phase, 3),
-
-            # Global Layer 2
             "service": {
                 "prescription_fill_rate_30d":       round(ts.prescription_fill_rate_30d, 3),
                 "prescription_fill_rate_7d":        round(ts.prescription_fill_rate_7d, 3),
@@ -937,8 +716,6 @@ class PharmaEnvironment(Environment):
                 "days_since_epidemic_alert_fired":  ts.days_since_epidemic_alert_fired,
                 "supply_disruption_days_last_30d":  ts.supply_disruption_days_last_30d,
             },
-
-            # Global Layer 3
             "warehouse": {
                 "procurement_budget_ratio":         round(ts.procurement_budget_ratio, 3),
                 "cold_storage_capacity_ratio":      round(ts.cold_storage_capacity_ratio, 3),
@@ -951,34 +728,24 @@ class PharmaEnvironment(Environment):
                 "orders_overdue_count":             ts.orders_overdue_count,
                 "overdue_qty_total":                round(ts.overdue_qty_total, 1),
             },
-
-            # Per-SKU (Layer 2 + Layer 3)
             "inventory": {
                 sku_id: {
                     "name":                         sku.name,
-
-                    # Layer 3 — real state
                     "inventory_on_hand":            round(sku.inventory_on_hand, 1),
                     "backorders":                   round(sku.backorders, 1),
                     "inbound_expected_3d":          round(sku.inbound_expected_3d, 1),
                     "inbound_expected_7d":          round(sku.inbound_expected_7d, 1),
                     "cold_storage_required":        sku.cold_storage_required,
-
-                    # Layer 2 — insights
                     "demand_last_3d":               round(sku.demand_last_3d, 1),
                     "demand_last_7d":               round(sku.demand_last_7d, 1),
                     "demand_trend":                 round(sku.demand_trend, 3),
                     "stockout_days_if_no_reorder":  round(sku.stockout_days_if_no_reorder, 1),
                     "coverage_gap_7d":              round(sku.coverage_gap_7d, 1),
-
-                    # Fixed domain params
                     "stockout_penalty":             sku.stockout_penalty,
                     "substitute_coverage_ratio":    sku.substitute_coverage_ratio,
                 }
                 for sku_id, sku in ts.skus.items()
             },
-
-            # Per-supplier (Layer 2 + Layer 3 + fixed params)
             "suppliers": {
                 sup_id: {
                     "last_observed_lead_time":  round(sup.last_observed_lead_time, 1),
@@ -991,16 +758,13 @@ class PharmaEnvironment(Environment):
                 }
                 for sup_id, sup in ts.suppliers.items()
             },
-
             "last_action_feedback": ts.last_action_feedback,
         }
-
-        state_json = json.dumps(state_dict, indent=2)
 
         return (
             _SYSTEM_PROMPT
             + "\n\n--- TODAY'S INVENTORY REPORT ---\n"
-            + state_json
+            + json.dumps(state_dict, indent=2)
             + "\n\n--- YOUR PROCUREMENT DECISION ---\n"
             + "Respond with a JSON object. "
             + "Format: {\"sku_name\": [quantity, \"supplier_name\"], ...}\n"
@@ -1008,101 +772,31 @@ class PharmaEnvironment(Environment):
         )
 
     # -----------------------------------------------------------------------
-    # Default task config (baseline — no events)
+    # Default task config
     # -----------------------------------------------------------------------
 
     def _default_task_config(self) -> Dict[str, Any]:
-        """
-        Returns a minimal baseline task config with no demand events.
-        Used when reset() is called without a task_config kwarg.
-        """
         D = 60
         return {
             "duration_days": D,
-
             "sku_configs": {
-                "insulin": {
-                    "name":                    "Insulin",
-                    "cold_storage_required":   True,
-                    "stockout_penalty":        100.0,
-                    "substitute_coverage_ratio": 0.0,
-                },
-                "paracetamol": {
-                    "name":                    "Paracetamol",
-                    "cold_storage_required":   False,
-                    "stockout_penalty":        20.0,
-                    "substitute_coverage_ratio": 0.6,
-                },
-                "bp_medication": {
-                    "name":                    "BP Medication",
-                    "cold_storage_required":   False,
-                    "stockout_penalty":        60.0,
-                    "substitute_coverage_ratio": 0.4,
-                },
-                "vitamins": {
-                    "name":                    "Vitamins",
-                    "cold_storage_required":   False,
-                    "stockout_penalty":        5.0,
-                    "substitute_coverage_ratio": 1.0,
-                },
+                "insulin":      {"name": "Insulin",      "cold_storage_required": True,  "stockout_penalty": 100.0, "substitute_coverage_ratio": 0.0},
+                "paracetamol":  {"name": "Paracetamol",  "cold_storage_required": False, "stockout_penalty":  20.0, "substitute_coverage_ratio": 0.6},
+                "bp_medication":{"name": "BP Medication", "cold_storage_required": False, "stockout_penalty":  60.0, "substitute_coverage_ratio": 0.4},
+                "vitamins":     {"name": "Vitamins",     "cold_storage_required": False, "stockout_penalty":   5.0, "substitute_coverage_ratio": 1.0},
             },
-
             "supplier_configs": {
-                "FastPharma": {
-                    "cold_chain_certified":    True,
-                    "sku_served":              ["insulin", "paracetamol", "bp_medication", "vitamins"],
-                    "unit_cost":               1.4,
-                    "expedite_allowed":        True,
-                    "expedite_cost_multiplier": 2.0,
-                    "base_lead_time_mean":     2.0,
-                },
-                "GlobalMed": {
-                    "cold_chain_certified":    False,
-                    "sku_served":              ["paracetamol", "bp_medication", "vitamins"],
-                    "unit_cost":               1.0,
-                    "expedite_allowed":        False,
-                    "expedite_cost_multiplier": 1.0,
-                    "base_lead_time_mean":     7.0,
-                },
+                "FastPharma": {"cold_chain_certified": True,  "sku_served": ["insulin","paracetamol","bp_medication","vitamins"], "unit_cost": 1.4, "expedite_allowed": True,  "expedite_cost_multiplier": 2.0, "base_lead_time_mean": 2.0},
+                "GlobalMed":  {"cold_chain_certified": False, "sku_served": ["paracetamol","bp_medication","vitamins"],           "unit_cost": 1.0, "expedite_allowed": False, "expedite_cost_multiplier": 1.0, "base_lead_time_mean": 7.0},
             },
-
-            "supplier_params": {
-                "FastPharma": {"lead_time_mean": 2.0, "lead_time_std": 0.5},
-                "GlobalMed":  {"lead_time_mean": 7.0, "lead_time_std": 2.5},
-            },
-
-            "disruption_params": {
-                "FastPharma": {"p_onset": 0.02, "p_persist": 0.30},
-                "GlobalMed":  {"p_onset": 0.08, "p_persist": 0.70},
-            },
-
-            "base_demands": {
-                "insulin":      10.0,
-                "paracetamol":  200.0,
-                "bp_medication": 50.0,
-                "vitamins":      75.0,
-            },
-
-            # Flat curves — no events in baseline
-            "demand_curves": {
-                sku: [1.0] * D
-                for sku in ["insulin", "paracetamol", "bp_medication", "vitamins"]
-            },
-
-            "supplier_stress": {
-                "FastPharma": [1.0] * D,
-                "GlobalMed":  [1.0] * D,
-            },
-
-            "starting_inventory": {
-                "insulin":      70.0,
-                "paracetamol":  1400.0,
-                "bp_medication": 350.0,
-                "vitamins":      525.0,
-            },
-
-            "cold_storage_total_capacity":  500.0,
-            "ambient_storage_total_capacity": 20000.0,
-            "total_budget":                 100000.0,
-            "cold_chain_breach_prob":       0.005,
+            "supplier_params":   {"FastPharma": {"lead_time_mean": 2.0, "lead_time_std": 0.5}, "GlobalMed": {"lead_time_mean": 7.0, "lead_time_std": 2.5}},
+            "disruption_params": {"FastPharma": {"p_onset": 0.02, "p_persist": 0.30},           "GlobalMed": {"p_onset": 0.08, "p_persist": 0.70}},
+            "base_demands":      {"insulin": 10.0, "paracetamol": 200.0, "bp_medication": 50.0, "vitamins": 75.0},
+            "demand_curves":     {sku: [1.0] * D for sku in ["insulin","paracetamol","bp_medication","vitamins"]},
+            "supplier_stress":   {"FastPharma": [1.0] * D, "GlobalMed": [1.0] * D},
+            "starting_inventory":{"insulin": 70.0, "paracetamol": 1400.0, "bp_medication": 350.0, "vitamins": 525.0},
+            "cold_storage_total_capacity":   500.0,
+            "ambient_storage_total_capacity":20000.0,
+            "total_budget":     100000.0,
+            "cold_chain_breach_prob": 0.005,
         }
