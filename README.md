@@ -1,103 +1,195 @@
----
-title: ETL Pipeline Scheduling Environment
-emoji: 🔧
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
----
+# Pharma Cold-Chain Inventory Management Environment
 
-# ETL Pipeline Scheduler: Operational AI Benchmark
+An OpenEnv-compliant benchmark for intelligent pharmaceutical warehouse procurement under uncertainty.
 
-The ETL Pipeline Scheduling Environment is an OpenEnv-compliant benchmark designed to test whether LLM agents can reason about **time, resources, and dependencies simultaneously** — the core challenge of real-world data engineering operations.
-
-An agent observes a live Directed Acyclic Graph (DAG) of interdependent ETL jobs. Each job has a duration, a CPU cost, upstream dependencies, and an optional SLA deadline. The agent must decide which jobs to start and when to wait, all under a shared pool of workers and CPU slots. Greedy agents fail. Agents that can reason about critical paths, resource contention windows, and multi-horizon deadlines succeed.
+An LLM agent manages a cold-chain warehouse stocking four drugs. Every day it receives an inventory report and decides what to order, how much, and from which supplier. Demand is stochastic. Lead times are uncertain. Suppliers can disrupt. The agent never sees the true underlying processes — it must infer risk from observable history and act under uncertainty.
 
 ---
 
 ## Motivation
 
-Production data pipelines fail in subtle ways that expose gaps in LLM operational reasoning:
+Pharmaceutical procurement fails in ways that directly harm patients. The decisions are made daily, the stakes are high, and the uncertainty is irreducible. This benchmark tests whether LLM agents can reason about the class of problems where:
 
-1. **Dependency-aware scheduling**: A job can only start when all its upstream dependencies are complete. Agents that ignore the DAG structure block themselves immediately.
-2. **Resource contention**: Multiple jobs compete for a shared CPU pool. Scheduling a low-priority job at the wrong moment can starve a critical-path job of the resources it needs, causing a cascade of SLA failures.
-3. **Deadline horizon reasoning**: SLA deadlines count from episode start, not from when a job becomes schedulable. An agent must work backwards from deadlines to decide *now* what to schedule *next*.
-4. **Resisting temptation**: Some jobs are ready to schedule but harmful to schedule — because they consume resources needed by higher-priority jobs arriving soon. The agent must learn to say no.
+1. **You cannot see the future demand** — only recent history and weak signals. Acting on the signal before the spike arrives is the skill being tested.
+2. **Lead times are uncertain and can extend** — ordering today does not guarantee stock arrives when you expect it. A supplier disruption can silently invalidate your inbound estimates.
+3. **Resources are constrained and shared** — a fixed procurement budget must cover all four drugs. Spending heavily on vitamins today might mean you cannot afford insulin tomorrow.
+4. **Priorities are asymmetric** — insulin has no substitute. A stockout is a patient harm event. Vitamins are fully substitutable. The agent must learn this hierarchy from penalty signals, not explicit rules.
+5. **Inaction is costly, but over-action is also costly** — ordering too much wastes budget and risks expiry. The agent must find the right amount, at the right time, from the right supplier.
 
 ---
 
-## Environment Specification
+## Environment Design
 
-### Observation Space
+### The Three-Layer State Architecture
 
-Each step the agent receives a structured JSON state object containing:
+Every state variable belongs to one of three layers:
 
-| Field | Description |
-| :--- | :--- |
-| `current_time_minutes` | Simulated minutes elapsed since episode start |
-| `task_deadline_minutes` | Minutes remaining until the final pipeline SLA |
-| `resources` | `workers_free`, `workers_total`, `cpu_free`, `cpu_total` |
-| `ready_jobs` | List of job IDs that can be scheduled right now |
-| `running_jobs` | List of `[job_id, minutes_remaining]` pairs |
-| `completed_jobs` | List of finished job IDs |
-| `jobs` | Full metadata for every job: `duration`, `cpu_required`, `depends_on`, `sla_deadline`, `critical_path` |
-| `edges` | All DAG dependency edges as `(parent_id, child_id)` pairs |
-| `critical_path` | Subset of edges on the critical path to the final deadline |
-| `last_feedback` | Plain-English result of the previous action |
+| Layer | Visible to Agent | Description |
+| :--- | :---: | :--- |
+| **Layer 1 — Hidden** | ✗ | True demand today, true lead times, disruption Markov state, breach probability |
+| **Layer 2 — Insights** | ✓ | Demand history, delivery history, epidemic alert, fill rate trends |
+| **Layer 3 — Real State** | ✓ | Inventory on hand, backorders, inbound estimates, budget, capacity |
 
-### Action Space
+The agent sees only Layers 2 and 3. It must infer the hidden layer from observable consequences — exactly as a real procurement manager would.
 
-The agent responds with exactly one of the following per step:
+### What Is Hidden (Layer 1)
 
-| Action | Effect |
-| :--- | :--- |
-| `[wait]` | Advance simulation time by 5 minutes; running jobs tick forward |
-| `[schedule: {job_id}]` | Start a single READY job (if resources allow) |
-| `[schedule: {job_id_1, job_id_2}]` | Start multiple READY jobs in one action |
+```
+true_demand_today           sampled from time-varying LogNormal process
+true_demand_mean_t          seasonal + event-driven mean (never shown)
+true_demand_std_t           true variance (never shown)
+true_lead_time              actual days until order arrives (stochastic)
+disruption_markov_state     current state of the disruption chain per supplier
+p_onset / p_persist         true disruption transition probabilities
+cold_chain_breach_prob      daily probability of refrigeration failure
+```
 
-A job can only be scheduled if `workers_free >= 1` **and** `cpu_free >= job.cpu_required`. Batching multiple jobs into one schedule action is more efficient than issuing separate actions.
+### What the Agent Observes (Layers 2 + 3)
+
+```
+# Global — Layer 2
+prescription_fill_rate_30d      rolling 30-day fill rate
+prescription_fill_rate_7d       rolling 7-day fill rate (detects recent decline)
+epidemic_alert_flag             fires when demand trend crosses threshold
+days_since_epidemic_alert_fired alert duration (0 = just fired, 5+ = near peak)
+supply_disruption_days_last_30d how hostile the disruption environment has been
+
+# Global — Layer 3
+procurement_budget_ratio        remaining / total quarterly budget
+cold_storage_capacity_ratio     insulin storage used / max
+ambient_capacity_ratio          B,C,D storage used / max
+cold_chain_integrity_flag       False = breach fired, all insulin destroyed
+orders_overdue_count            orders past expected arrival date
+overdue_qty_total               units stuck in overdue orders
+
+# Per SKU — Layer 2 (insights)
+demand_last_3d                  actual demand over last 3 days
+demand_last_7d                  actual demand over last 7 days
+demand_trend                    (demand_last_3d/3) - (demand_last_7d/7)
+stockout_days_if_no_reorder     days until stockout if agent does nothing today
+coverage_gap_7d                 demand_last_7d - inventory_on_hand
+
+# Per SKU — Layer 3 (real state)
+inventory_on_hand               units physically on shelf
+backorders                      unfilled prescriptions accumulated
+inbound_expected_3d             units ordered, expected within 3 days (estimate)
+inbound_expected_7d             units ordered, expected within 7 days (estimate)
+
+# Per Supplier — Layer 2 (insights)
+last_observed_lead_time         lead time from most recent delivery
+on_time_rate_14d                fraction of recent orders delivered on time
+
+# Per Supplier — Layer 3 (real state)
+disruption_active               True if supplier confirmed disrupted right now
+```
+
+---
+
+## The Warehouse
+
+### SKUs
+
+| SKU | Drug | Storage | Stockout Penalty | Substitute | Key Risk |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| `insulin` | Insulin | Cold (2–8°C) | 100 | None (0.0) | Cold chain breach, single supplier |
+| `bp_medication` | Amlodipine (BP Med) | Ambient | 60 | Partial (0.4) | Chronic patients, supply disruption |
+| `paracetamol` | Paracetamol | Ambient | 20 | Partial (0.6) | Flu season demand spikes |
+| `vitamins` | Vitamins | Ambient | 5 | Full (1.0) | Seasonal winter demand, low priority |
+
+### Suppliers
+
+| Supplier | Cold Certified | SKUs Served | Lead Time | Reliability | Cost | Expedite |
+| :--- | :---: | :--- | :--- | :---: | :---: | :---: |
+| `FastPharma` | ✓ | All four | ~2 days (σ=0.5) | High (0.95) | 1.4x | ✓ (2x cost) |
+| `GlobalMed` | ✗ | Paracetamol, BP, Vitamins | ~7 days (σ=2.5) | Lower (0.70) | 1.0x | ✗ |
+
+**Critical constraint**: Insulin can only be ordered from `FastPharma`. `GlobalMed` is not cold-chain certified. This is a hard constraint the agent must discover from the `cold_chain_certified` field — not from an explicit rule.
+
+---
+
+## Action Space
+
+The agent responds each day with a JSON object:
+
+```json
+{
+  "insulin":      [100, "FastPharma"],
+  "paracetamol":  [500, "GlobalMed"]
+}
+```
+
+- Include only SKUs you want to order today. Omit SKUs = no order.
+- `quantity` must be positive.
+- `supplier_name` must be in the supplier's `sku_served` list.
+- Insulin orders to non-certified suppliers are rejected.
+- Orders exceeding budget or storage capacity are rejected.
+- Orders to disrupted suppliers are rejected.
+- Send `{}` to place no orders today.
 
 ---
 
 ## Tasks and Difficulty
 
-| Task | Difficulty | Jobs | Workers | CPU | Time Budget | Key Challenge |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| `pipeline_easy` | **Easy** | 3 | 2 | 4 | 60 min | Zero slack — act on step 1 or miss the SLA |
-| `pipeline_medium` | **Medium** | 6 | 3 | 6 | 120 min | CPU trap job that starves the critical path |
-| `pipeline_difficult` | **Hard** | 10 | 4 | 8 | 180 min | Two large jobs that cannot run simultaneously |
+Three scenario types, three difficulty levels each. All episodes run 60 days.
 
-### `pipeline_easy` — Zero-Slack Linear Chain
+### Task 1 — Supply Chain Broken
 
-A three-job sequential pipeline: `ingest_customers → clean_customers → build_report`. All jobs run on the same single critical path. `clean_customers` carries an SLA deadline at **t=40 min**. Since `ingest_customers` takes 10 minutes, the agent must schedule it on step 1 with no waiting. Any idle step at the start causes the SLA to expire. Tests immediate critical-path recognition and the understanding that SLA deadlines are absolute, not relative.
+Supply chain stress. Both suppliers experience extended lead times. GlobalMed goes fully offline for a window mid-episode. Demand barely changes — the challenge is entirely supply-side.
 
-```
-ingest_customers (10 min) → clean_customers (10 min, SLA=40) → build_report (10 min, SLA=60)
-```
+**What the agent must learn**: Shelves look fine today but orders placed now will take 2–4x longer to arrive. Build safety stock before the stress window hits. Reactive ordering arrives too late.
 
-### `pipeline_medium` — The CPU Trap
-
-Two parallel ingest streams converge at `compute_revenue`. A third job, `ingest_logs`, is ready at t=0 with no dependencies — but it consumes 3 of 6 available CPU slots. If the agent schedules it, `clean_sales` (also requiring 3 CPU) cannot start when `ingest_sales` finishes, causing `clean_sales` to breach its SLA at t=50, which cascades into `compute_revenue` (SLA=90) and `summary_report` (SLA=110). The agent must identify and defer the trap job while parallelising the two safe ingest streams.
+| Difficulty | Stress Start | GlobalMed Lead Mult | Offline Window | Starting Cover |
+| :--- | :---: | :---: | :---: | :---: |
+| Easy | Day 25 | 1.5x | 5 days @ day 40 | 14 days |
+| Medium | Day 15 | 2.5x | 10 days @ day 35 | 7 days |
+| Hard | Day 8 | 4.0x | 15 days @ day 25 | 4 days |
 
 ```
-ingest_sales (15 min, 2 CPU) → clean_sales (15 min, 2 CPU, SLA=50) ──┐
-ingest_events (12 min, 1 CPU) → clean_events (10 min, 1 CPU)         ├→ compute_revenue (20 min, 3 CPU, SLA=90) → summary_report (10 min, SLA=110)
-ingest_logs [TRAP] (20 min, 3 CPU) ─────────────────── off-path ─────┘
+Day 1–14:   Normal operations. Window to build stock.
+Day 15+:    GlobalMed lead times extending.
+Day 35–44:  GlobalMed fully offline. FastPharma only, at premium cost.
+Day 45–60:  Recovery. Lead times normalise.
 ```
 
-### `pipeline_difficult` — Double Diamond with a Time Bomb
+### Task 2 — Flu Season
 
-Two overlapping diamond-shaped dependency chains share a single terminal bottleneck (`daily_summary`). The central challenge is that `compute_revenue` (3 CPU, SLA=100) and `anomaly_detection` (3 CPU, SLA=130) together require 6 CPU but only 8 are available — they cannot run simultaneously alongside other active jobs and must be sequenced in deadline order. An additional temptation job (`enrich_reference`, no dependencies, 2 CPU) must be scheduled in a precise window: too early it starves the first clean wave; too late it delays `anomaly_detection` past its SLA. Requires genuine multi-horizon deadline reasoning across 4 workers.
+Flu season demand surge. Paracetamol demand rises sharply. Insulin spikes when flu hits diabetics. GlobalMed slows as logistics workers fall sick.
+
+**What the agent must learn**: Epidemic alert fires a few days before the peak. Pre-stock before the surge — not after. Insulin and paracetamol peak close together, forcing budget triage. Insulin must win.
+
+| Difficulty | Flu Onset | Paracetamol Peak | Insulin Peak | Para Amplitude | Supply Stress |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| Easy | Day 25 | Day 35 | Day 40 | 0.8x | None |
+| Medium | Day 15 | Day 25 | Day 30 | 1.5x | GlobalMed 1.8x from day 23 |
+| Hard | Day 8 | Day 18 | Day 23 | 2.2x | GlobalMed 1.8x from day 11 |
 
 ```
-ingest_sales (20 min) → clean_sales (15 min, SLA=70) ────────────────────────────────────────────┐
-ingest_events (15 min) → clean_events (10 min) ──┬──→ compute_revenue (20 min, 3 CPU, SLA=100) ──┤
-ingest_inventory (12 min) → clean_inventory ─────┤                                               ├→ daily_summary (12 min, SLA=150)
-enrich_reference [window job] (18 min, 2 CPU) ───┴──→ compute_metrics (18 min) → anomaly_detection (25 min, 3 CPU, SLA=130) ──┘
+Day 1–onset:         Early season. Epidemic alert fires ~3 days before peak.
+Day onset+10:        Paracetamol demand at peak.
+Day onset+15:        Insulin demand spikes (flu hits diabetics).
+Day onset+25:        Demand normalising.
+```
+
+### Task 3 — Epidemic, Two Waves (Hydroxychloroquine)
+
+Two-wave epidemic. Primary drug: Hydroxychloroquine (HCQ). Wave 1 peaks at day 17. Wave 2 peaks at day 45 and is larger. Lead times worsen exactly when demand peaks.
+
+**What the agent must learn**: Pre-stock HCQ before day 17. The trough between waves is a trap — wave 2 is larger, ordering must continue. Lead time stress hits before the peak at hard difficulty — orders placed at the peak arrive after it.
+
+| Difficulty | Wave 1 Amplitude | Wave 2 Amplitude | Wave Width | Lead Stress Timing |
+| :--- | :---: | :---: | :---: | :--- |
+| Easy | 1.2x (2.2x total) | 1.0x (smaller) | Wide (9 days) | After peak |
+| Medium | 1.8x (2.8x total) | 2.5x (larger) | Normal (6 days) | At peak |
+| Hard | 2.5x (3.5x total) | 3.5x (much larger) | Narrow (4 days) | Before peak |
+
+```
+Day 1–12:   Rising HCQ demand. Epidemic alert fires ~day 12.
+Day 17:     WAVE 1 PEAK.
+Day 17–35:  Declining. Lead times normalise.
+Day 35–40:  TROUGH. Relative calm. Second wave building silently.
+Day 40+:    Epidemic alert re-fires. Second wave rising.
+Day 45:     WAVE 2 PEAK — larger than wave 1.
+Day 45–60:  Declining. Episode ends before full recovery.
 ```
 
 ---
@@ -106,36 +198,51 @@ enrich_reference [window job] (18 min, 2 CPU) ───┴──→ compute_metr
 
 ### Per-Step Reward
 
-At every step, the environment computes:
-
 ```
-step_reward = clamp(0.7 × sla_success_ratio + 0.3 × critical_sla_success_ratio, 0.01, 0.99)
-```
-
-| Term | Definition |
-| :--- | :--- |
-| `sla_success_ratio` | `(SLA-due jobs completed on time) / (all SLA-due jobs)` |
-| `critical_sla_success_ratio` | `(critical-path SLA-due jobs completed) / (critical-path SLA-due jobs)` |
-
-Both ratios default to **1.0** when no SLA deadlines have yet expired — the agent starts with full credit and loses it as deadlines pass with incomplete jobs.
-
-### Final Task Score
-
-```
-task_score = clamp(0.5 × mean(step_rewards) + 0.5 × (jobs_completed / total_jobs), 0.01, 0.99)
+step_reward = clamp(
+    0.50 × prescription_fill_rate_7d
+  + 0.30 × critical_sku_fill_rate
+  + 0.10 × (1 - mean_expiry_pressure)
+  + 0.10 × procurement_budget_ratio,
+  0.01, 0.99
+)
 ```
 
-The two terms measure complementary things: `mean(step_rewards)` captures *how well* SLAs were respected throughout the episode; `jobs_completed / total_jobs` captures *whether* the pipeline was actually finished. An agent that completes the pipeline but misses every SLA, and an agent that respects every SLA but never finishes the pipeline, both score around 0.5.
+| Term | Weight | Definition |
+| :--- | :---: | :--- |
+| `prescription_fill_rate_7d` | 0.50 | Fraction of prescriptions filled on time in last 7 days |
+| `critical_sku_fill_rate` | 0.30 | Mean fill rate for insulin and BP medication specifically |
+| `1 - mean_expiry_pressure` | 0.10 | Penalises over-stocking perishables |
+| `procurement_budget_ratio` | 0.10 | Rewards fiscal discipline |
+
+### Final Episode Score
+
+```
+final_score = clamp(
+    0.5 × mean(step_rewards)
+  + 0.3 × prescription_fill_rate_30d
+  + 0.2 × (1 - total_backorder_ratio),
+  0.01, 0.99
+)
+```
+
+| Term | Weight | What It Measures |
+| :--- | :---: | :--- |
+| `mean(step_rewards)` | 0.50 | Decision quality throughout the episode |
+| `prescription_fill_rate_30d` | 0.30 | End-of-episode service level |
+| `1 - total_backorder_ratio` | 0.20 | Whether accumulated debt was resolved |
 
 **Success threshold: 0.80**
+
+An agent that fills all prescriptions but drains the budget early scores ~0.60. An agent that protects the budget but lets insulin stock out repeatedly scores ~0.50. Only an agent that manages both dimensions consistently scores above 0.80.
 
 ---
 
 ## Baseline Benchmarks
 
-Evaluated across all 3 tasks. Scores represent Final Task Score [0.01 – 0.99].
+Evaluated across all 9 task configurations. Scores represent Final Episode Score [0.01–0.99].
 
-| Model | `pipeline_easy` | `pipeline_medium` | `pipeline_difficult` | Success Rate |
+| Model | Supply Chain (E/M/H) | Flu Season (E/M/H) | Epidemic (E/M/H) | Success Rate |
 | :--- | :---: | :---: | :---: | :---: |
 | *Results to be published post-evaluation* | — | — | — | — |
 
@@ -183,11 +290,14 @@ python inference.py
 ## Project Structure
 
 ```
-pipeline_env/
-├── environment.py   # Core simulation: DAG execution, resource tracking, time advancement
-├── models.py        # Pydantic schemas: JobNode, TaskState, ResourceState, PipelineAction
-├── tasks.py         # Task blueprints (easy/medium/difficult) + reward function
-├── inference.py     # Benchmark execution: runs all 3 tasks, emits START/STEP/END logs
+pharma_env/
+├── environment.py   # Core simulation: demand sampling, inventory updates,
+│                    # arrivals, disruptions, cold chain breach, LLM prompt
+├── models.py        # Pydantic schemas: SKUState, SupplierState, InventoryState,
+│                    # PharmaAction
+├── tasks.py         # Task constructors (supply_chain_broken, flu_season,
+│                    # epidemic_two_wave) + reward functions
+├── inference.py     # Benchmark execution
 ├── client.py        # OpenEnv async client
 └── openenv.yaml     # Environment manifest
 ```
@@ -196,8 +306,12 @@ pipeline_env/
 
 ## Key Design Decisions
 
-**Event-driven time advancement**: The `[schedule]` action does not cost a full time step. Instead, time advances exactly to the moment when the earliest running job finishes, making scheduling decisions effectively free in terms of simulated time. Only `[wait]` burns a fixed 5-minute block. This means the agent is rewarded for parallelism and penalised for unnecessary waiting.
+**Three-layer state architecture**: The environment strictly separates hidden stochastic processes (Layer 1), observable history (Layer 2), and current real state (Layer 3). The agent is never shown true demand, true lead times, or true disruption probabilities. It infers risk from consequences — exactly as a real operations manager would.
 
-**SLA deadlines are absolute**: All `sla_deadline` values in job definitions count from `t=0` (episode start), not from when the job becomes schedulable. This forces the agent to reason about the full DAG timeline upfront rather than reacting greedily step-by-step.
+**Reactive disruption discovery**: The agent discovers supplier disruptions and cold chain breaches AFTER they happen, not before. `disruption_active` flips to `True` on the day the disruption fires. `cold_chain_integrity_flag` flips to `False` on the day of the breach. This makes disruption response a genuine reactive challenge.
 
-**Separate `time_budget` and `task_deadline`**: `time_budget` is the hard episode termination limit. `task_deadline` is the SLA for the final pipeline job. `task_deadline < time_budget` in medium and hard tasks, meaning the agent has buffer time but no SLA buffer — finishing late is not the same as finishing on time.
+**Honest inbound estimates**: `inbound_expected_3d` and `inbound_expected_7d` are computed using `last_observed_lead_time` — the agent's best historical estimate. If the true lead time is longer (due to disruption or stochastic variance), these estimates are silently optimistic. The agent discovers inaccuracy via rising `orders_overdue_count`.
+
+**Epidemic alert from observable history**: `epidemic_alert_flag` fires when the observed 3-day demand average exceeds the 14-day average by 40%. It is triggered by observable history, not by the hidden epidemic process. This gives the agent a 3–5 day warning window but not the true spike magnitude — the agent must decide how aggressively to pre-stock under this uncertainty.
+
+**Asymmetric drug priority**: The penalty hierarchy (insulin 100 >> BP med 60 >> paracetamol 20 >> vitamins 5) and the `cold_chain_certified` hard constraint together force the agent to discover a medically coherent priority ordering from the reward signal alone — not from explicit rules in the prompt.
