@@ -46,11 +46,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from openai import OpenAI
 
 try:
-    from client import PipelineEnvClient
+    from client import PharmaEnvClient
     from models import InventoryState, PharmaAction
     from tasks import TASK_CONFIGS, compute_final_score
 except ImportError:
-    from client import PipelineEnvClient
+    from client import PharmaEnvClient
     from models import InventoryState, PharmaAction
     from tasks import TASK_CONFIGS, compute_final_score
 
@@ -383,10 +383,10 @@ async def run_episode(
     task_name = f"{task_config['task_id']}_{task_config['difficulty']}"
 
     if IMAGE_NAME:
-        env = await PipelineEnvClient.from_docker_image(IMAGE_NAME)
+        env = await PharmaEnvClient.from_docker_image(IMAGE_NAME)
     else:
         base_url = os.getenv("ENV_BASE_URL", "http://localhost:8000")
-        env = PipelineEnvClient(base_url=base_url)
+        env = PharmaEnvClient(base_url=base_url)
 
     # Per-episode state
     rewards:        List[float]                  = []
