@@ -1,3 +1,16 @@
+---
+title: Pharma Cold-Chain Inventory Environment
+emoji: 💊
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 8000
+base_path: /web
+tags:
+  - openenv
+---
+
 # Pharma Cold-Chain Inventory Management — OpenEnv Benchmark
 
 An OpenEnv-compliant benchmark where an LLM agent manages a pharmaceutical warehouse over a 60-day episode. Every day the agent reads an inventory report and decides what to order, how much, and from which supplier. Demand is stochastic, lead times are uncertain, suppliers can disrupt, and a cold chain can fail. The agent must act under uncertainty with no visibility into the underlying processes driving the environment.
@@ -164,7 +177,8 @@ python inference.py
 | `API_BASE_URL` | `https://router.huggingface.co/v1` | LLM API endpoint |
 | `MODEL_NAME` | `Qwen/Qwen2.5-72B-Instruct` | Model identifier |
 | `HF_TOKEN` | — | HuggingFace API key |
-| `ENV_BASE_URL` | `http://localhost:8000` | Server URL |
+| `LOCAL_IMAGE_NAME` | — | Docker image name (optional) |
+| `ENV_BASE_URL` | `http://localhost:8000` | Server URL when not using Docker |
 
 ---
 
