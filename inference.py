@@ -392,7 +392,7 @@ async def run_episode(
     rewards:        List[float]                  = []
     action_history: List[Tuple[int, str, str]]   = []
     steps_taken  = 0
-    score        = 0.0
+    score        = 0.01
     success      = False
     last_obs     = None
 
@@ -485,7 +485,12 @@ async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     for task_config in TASK_CONFIGS:
-        await run_episode(client=client, task_config=task_config)
+        try:
+            await run_episode(client=client, task_config=task_config)
+        except Exception as exc:
+            task_name = f"{task_config['task_id']}_{task_config['difficulty']}"
+            print(f"[DEBUG] Task {task_name} failed entirely: {exc}", flush=True)
+            log_end(success=False, steps=0, score=0.01, rewards=[])
 
 
 if __name__ == "__main__":
