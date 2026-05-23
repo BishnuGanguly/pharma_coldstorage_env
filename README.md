@@ -177,8 +177,12 @@ python inference.py
 | `API_BASE_URL` | `https://router.huggingface.co/v1` | LLM API endpoint |
 | `MODEL_NAME` | `Qwen/Qwen2.5-72B-Instruct` | Model identifier |
 | `HF_TOKEN` | — | HuggingFace API key |
+<<<<<<< HEAD
 | `LOCAL_IMAGE_NAME` | — | Docker image name (optional) |
 | `ENV_BASE_URL` | `http://localhost:8000` | Server URL when not using Docker |
+=======
+| `ENV_BASE_URL` | `http://localhost:8000` | Server URL |
+>>>>>>> 25b3278ac453e5c3b183d6568c8e3772e696d929
 
 ---
 
