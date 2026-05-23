@@ -31,19 +31,21 @@ def print_state(label: str, state: Any) -> None:
 
 def assert_basic_invariants(state: InventoryState) -> None:
     """Sanity checks for the InventoryState."""
-    assert 0 <= state.current_date
-    assert 0.0 <= state.prescription_fill_rate_30d <= 1.0
-    assert 0.0 <= state.prescription_fill_rate_7d <= 1.0
-    assert 0.0 <= state.procurement_budget_ratio <= 1.0
-    assert 0.0 <= state.cold_storage_capacity_ratio <= 1.0
-    assert 0.0 <= state.ambient_capacity_ratio <= 1.0
+    assert state.current_date >= 0
+    assert 0.0 <= state.cold_storage_ratio <= 1.0
+    assert 0.0 <= state.ambient_storage_ratio <= 1.0
     assert state.cold_storage_current_capacity <= state.cold_storage_total_capacity
     assert state.ambient_storage_current_capacity <= state.ambient_storage_total_capacity
+    assert state.inventory_excess_today >= 0.0
+    assert state.inventory_excess_cumulative >= 0.0
     assert len(state.skus) > 0
-    assert len(state.suppliers) > 0
-    for sku in state.skus.values():
-        assert sku.inventory_on_hand >= 0.0
-        assert sku.backorders >= 0.0
+    for sku_id, sku in state.skus.items():
+        assert sku.inventory_on_hand >= 0.0, f"{sku_id}: negative inventory_on_hand"
+        assert 0.0 <= sku.demand_fulfilled_today <= 1.0, (
+            f"{sku_id}: demand_fulfilled_today={sku.demand_fulfilled_today} out of [0, 1]"
+        )
+        assert sku.avg_demand_per_day >= 0.0, f"{sku_id}: negative avg_demand_per_day"
+        assert sku.stockout_days_if_no_reorder >= 0.0, f"{sku_id}: negative stockout_days"
     print("  [invariants OK]")
 
 
@@ -71,48 +73,46 @@ def run_direct_environment_smoke_test() -> PharmaEnvironment:
     print_state("STATE AFTER EMPTY ORDER ({})", state)
     assert_basic_invariants(state)
 
-    # 4) Order insulin from FastPharma (cold-chain certified)
-    insulin_action = PharmaAction(orders={"insulin": (50.0, "FastPharma")})
+    # 4) Order insulin (cold-chain SKU)
+    insulin_action = PharmaAction(orders={"insulin": 50.0})
     state = env.step(insulin_action)
-    print_state("STATE AFTER ORDERING 50 INSULIN FROM FastPharma", state)
+    print_state("STATE AFTER ORDERING 50 INSULIN", state)
     assert_basic_invariants(state)
 
-    # 5) Order paracetamol from GlobalMed (cheaper, non-cold-chain)
-    para_action = PharmaAction(orders={"paracetamol": (500.0, "GlobalMed")})
+    # 5) Order paracetamol (ambient SKU)
+    para_action = PharmaAction(orders={"paracetamol": 500.0})
     state = env.step(para_action)
-    print_state("STATE AFTER ORDERING 500 PARACETAMOL FROM GlobalMed", state)
+    print_state("STATE AFTER ORDERING 500 PARACETAMOL", state)
     assert_basic_invariants(state)
 
     # 6) Multi-SKU order
     multi_action = PharmaAction(orders={
-        "bp_medication": (200.0, "FastPharma"),
-        "vitamins":      (300.0, "GlobalMed"),
+        "insulin":     100.0,
+        "paracetamol": 300.0,
     })
     state = env.step(multi_action)
-    print_state("STATE AFTER MULTI-SKU ORDER (bp_medication + vitamins)", state)
+    print_state("STATE AFTER MULTI-SKU ORDER (insulin + paracetamol)", state)
     assert_basic_invariants(state)
 
-    # 7) Invalid: try to order insulin from GlobalMed (not cold-chain certified)
-    invalid_action = PharmaAction(orders={"insulin": (30.0, "GlobalMed")})
-    state = env.step(invalid_action)
-    print_state("STATE AFTER INVALID ORDER (insulin from non-certified GlobalMed)", state)
-    assert_basic_invariants(state)
-    assert "rejected" in state.last_action_feedback.lower(), (
-        f"Expected rejection feedback, got: {state.last_action_feedback}"
-    )
-
-    # 8) Parse action from raw LLM message string
-    llm_message = '{"insulin": [40, "FastPharma"], "paracetamol": [300, "GlobalMed"]}'
+    # 7) Parse action from raw LLM message string
+    #    _parse_action extracts numeric values only — must be plain numbers, not tuples
+    llm_message = '{"insulin": 40, "paracetamol": 300}'
     llm_action = PharmaAction(message=llm_message)
     state = env.step(llm_action)
     print_state("STATE AFTER LLM MESSAGE ACTION (parsed from JSON string)", state)
     assert_basic_invariants(state)
 
-    # 9) Malformed message — should fallback gracefully
+    # 8) Malformed message — should fallback gracefully (no orders placed)
     bad_action = PharmaAction(message="I would like to order some drugs please")
     state = env.step(bad_action)
     print_state("STATE AFTER MALFORMED LLM MESSAGE (should process with no orders)", state)
     assert_basic_invariants(state)
+
+    # 9) Verify reward fields are populated after steps
+    assert isinstance(state.reward, float), "reward should be a float"
+    print(f"\n  reward={state.reward:.4f}  "
+          f"excess_today={state.inventory_excess_today:.4f}  "
+          f"excess_cumulative={state.inventory_excess_cumulative:.4f}")
 
     # 10) Check OpenEnv state metadata
     env_state = env.state
@@ -144,20 +144,42 @@ async def run_http_client_smoke_test() -> None:
         assert_basic_invariants(result.observation)
 
         # Order insulin via client
-        action = PharmaAction(orders={"insulin": (50.0, "FastPharma")})
+        action = PharmaAction(orders={"insulin": 50.0})
         result = await client.step(action)
         print_state("CLIENT STEP AFTER ORDERING INSULIN", result.observation)
         assert_basic_invariants(result.observation)
 
         # Multi-SKU order via client
         action = PharmaAction(orders={
-            "paracetamol":  (400.0, "GlobalMed"),
-            "bp_medication": (150.0, "FastPharma"),
+            "paracetamol": 400.0,
+            "insulin":     150.0,
         })
         result = await client.step(action)
         print_state("CLIENT STEP AFTER MULTI-SKU ORDER", result.observation)
         assert_basic_invariants(result.observation)
 
+        # ordering insulin again to test cold storage capacity limits
+        action = PharmaAction(orders={"insulin":50.0})
+        result = await client.step(action)
+        print("the result returned from the client is of type ", type(result))
+        print("the raw result returned from the client is ", result)
+        print_state("CLIENT STEP AFTER ORDERING INSULIN AGAIN", result.observation)
+        assert_basic_invariants(result.observation)
+        #three empty to deplete the cold storage.
+        action = PharmaAction(orders={"insulin": 0.0})
+        result = await client.step(action)
+        print_state("CLIENT STEP AFTER 1ST EMPTY ORDER (depleting cold storage)", result.observation)
+        assert_basic_invariants(result.observation)
+
+        action = PharmaAction(orders={"insulin": 0.0})
+        result = await client.step(action)
+        print_state("CLIENT STEP AFTER 2ND EMPTY ORDER (depleting cold storage)", result.observation)
+        assert_basic_invariants(result.observation)
+        
+        action = PharmaAction(orders={"insulin": 0.0})
+        result = await client.step(action)
+        print_state("CLIENT STEP AFTER 3 EMPTY ORDERS (depleting cold storage)", result.observation)
+        assert_basic_invariants(result.observation)
         print("\nHTTP client smoke test passed.")
     finally:
         close_fn = getattr(client, "close", None)

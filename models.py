@@ -1,110 +1,8 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
-from pydantic import BaseModel, Field, model_validator
-from openenv.core.env_server.types import Action, Observation, State
-
-
-# ---------------------------------------------------------------------------
-# SupplierState
-# ---------------------------------------------------------------------------
-
-class SupplierState(BaseModel):
-    """
-    Represents one supplier's observable state.
-
-    Layer 1 (hidden — never stored here):
-        true lead_time_mean, lead_time_std, inbound_risk_probability
-        These live only in the environment's internal simulation state.
-
-    Layer 2 (insights — agent sees):
-        last_observed_lead_time, on_time_rate_14d, sku_served
-
-    Layer 3 (current real — agent sees):
-        disruption_active
-    """
-
-    # -- Identity (fixed domain parameter) ----------------------------------
-    supplier_id: str = Field(
-        ...,
-        description="Unique supplier identifier. Example: 'FastPharma'.",
-    )
-
-    cold_chain_certified: bool = Field(
-        ...,
-        description=(
-            "True if this supplier can handle cold-chain SKUs (e.g. insulin). "
-            "FastPharma=True, GlobalMed=False. Never changes during episode."
-        ),
-    )
-
-    # -- Fixed domain parameters (visible, never change) --------------------
-    sku_served: List[str] = Field(
-        default_factory=list,
-        description=(
-            "List of SKU IDs this supplier can fulfill. "
-            "FastPharma serves all SKUs. GlobalMed serves non-cold-chain only."
-        ),
-    )
-
-    unit_cost: float = Field(
-        ...,
-        ge=0.0,
-        description=(
-            "Normalised cost per unit from this supplier. "
-            "FastPharma=1.4 (premium), GlobalMed=1.0 (baseline)."
-        ),
-    )
-
-    expedite_allowed: bool = Field(
-        default=False,
-        description=(
-            "True if emergency expedited orders are possible. "
-            "FastPharma=True, GlobalMed=False."
-        ),
-    )
-
-    expedite_cost_multiplier: float = Field(
-        default=1.0,
-        ge=1.0,
-        description=(
-            "Cost multiplier when expediting an order. "
-            "Only relevant if expedite_allowed=True."
-        ),
-    )
-
-    # -- Layer 2: Historical insights (agent observes) ----------------------
-    last_observed_lead_time: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Lead time (days) of the most recently completed delivery. "
-            "Agent's best estimate of current lead time. "
-            "Updates each time an order from this supplier arrives. "
-            "Starts at 0 — no deliveries yet at episode start."
-        ),
-    )
-
-    on_time_rate_14d: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Fraction of orders delivered on time over the last 14 days. "
-            "Agent infers reliability from observed history, not ground truth. "
-            "1.0 = perfectly reliable, 0.0 = all recent orders were late."
-        ),
-    )
-
-    # -- Layer 3: Current real state (agent observes) -----------------------
-    disruption_active: bool = Field(
-        default=False,
-        description=(
-            "True if this supplier is currently disrupted. "
-            "Agent discovers this AFTER disruption starts — reactive, not predictive. "
-            "Set by the environment when the hidden Markov disruption chain fires."
-        ),
-    )
+from pydantic import BaseModel, Field, field_validator, model_validator
+from openenv.core.env_server.types import Action, Observation
 
 
 # ---------------------------------------------------------------------------
@@ -112,442 +10,411 @@ class SupplierState(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SKUState(BaseModel):
-    """
-    Represents one SKU's full state across all three layers.
 
-    Layer 1 (hidden — never stored here):
-        demand_today, true_demand_mean_t, true_demand_std_t
-        inbound qty and true arrival date (subject to lead time randomness)
-        These live only in the environment's internal simulation state.
-
-    Layer 2 (insights — agent observes):
-        demand_last_3d, demand_last_7d, demand_trend,
-        stockout_days_if_no_reorder, coverage_gap_7d
-
-    Layer 3 (current real — agent observes):
-        inventory_on_hand, inbound_expected_3d, inbound_expected_7d,
-        stockout_penalty, cold_storage_required
-    """
-
-    # -- Identity (fixed) ---------------------------------------------------
     sku_id: str = Field(
-        ...,
-        description="Unique SKU identifier. Example: 'insulin', 'paracetamol'.",
+        default="sku_123",
+        description="Unique identifier for the SKU. Used as the key in all order and inventory dicts."
     )
 
-    name: str = Field(
-        ...,
-        description="Human-readable drug name for the LLM prompt.",
+    # -- Insights (derived from observable history — agent sees these) -------
+
+    avg_demand_per_day: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Rolling average daily demand computed over the full history available so far. "
+            "Primary signal for long-run reorder sizing."
+        ),
     )
 
-    # -- Fixed domain parameters (visible, never change) --------------------
+    avg_demand_last_5_days: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Average daily demand over the last 5 days. "
+            "Reacts faster than avg_demand_per_day — use to detect short-term demand shifts."
+        ),
+    )
+
+    avg_lead_time: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Rolling average lead time in days computed from all observed deliveries so far. "
+            "Agent uses this to estimate expected_inbound_orders arrival dates."
+        ),
+    )
+
+    lead_time_last3_orders: List[float] = Field(
+        default_factory=list,
+        description=(
+            "Actual lead times of the 3 most recent deliveries, oldest first. "
+            "Short window makes supply chain stress visible quickly. "
+            "Capped at 3 entries — older values are dropped."
+        ),
+    )
+
+    # demand_trend: float = Field(
+    #     default=0.0,
+    #     description=(
+    #         "Demand acceleration signal: (avg_demand_last_3d / 3) - (avg_demand_last_7d / 7). "
+    #         "Positive = demand accelerating. Negative = demand decelerating. "
+    #         "Gives early warning of spikes before they fully show up in avg_demand_per_day."
+    #     ),
+    # )
+
+    stockout_days_if_no_reorder: float = Field(
+        default=999.0,
+        ge=0.0,
+        description=(
+            "Days until stockout if no new orders are placed: inventory_on_hand / avg_demand_per_day. "
+            "999.0 when demand is zero. Most urgent reorder signal per SKU."
+        ),
+    )
+
+    # -- Current real state (depends on true hidden demand) ------------------
+
     cold_storage_required: bool = Field(
-        ...,
+        default=False,
         description=(
             "True if this SKU requires refrigerated cold storage. "
-            "Insulin=True. All others=False. "
-            "Determines which capacity pool is used."
+            "Determines which capacity pool (cold vs ambient) is consumed."
         ),
+    )
+
+    inventory_on_hand: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Units physically on shelf right now after today's demand has been consumed.",
     )
 
     stockout_penalty: float = Field(
-        ...,
+        default=0.0,
         ge=0.0,
         description=(
-            "Cost incurred per unit of unmet demand. "
-            "Encodes medical priority: insulin >> bp_med >> paracetamol >> vitamins. "
-            "Used by the reward function. Visible to agent for triage decisions."
+            "Per-unit penalty applied to unmet demand for this SKU. "
+            "Encodes medical criticality — insulin >> antiflu >> vitamins."
         ),
     )
 
-    substitute_coverage_ratio: float = Field(
+    waste_penalty: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Per-unit penalty applied when inbound stock is rejected due to capacity overflow. "
+            "Reflects the cost of spoilage and wasted procurement spend."
+        ),
+    )
+
+    # -- Reward tracking (environment writes, agent reads) -------------------
+
+    demand_fulfilled_today: float = Field(
         default=0.0,
         ge=0.0,
         le=1.0,
         description=(
-            "Fraction of demand coverable by a substitute SKU if this one stockouts. "
-            "insulin=0.0 (no substitute), vitamins=1.0 (fully substitutable). "
-            "Informs the agent how critical a stockout is."
+            "Fraction of today's demand that was fulfilled: units_served / true_demand. "
+            "1.0 = fully served. 0.5 = half the demand was met. 0.0 = complete stockout."
         ),
     )
 
-    # -- Layer 2: Historical insights (agent observes) ----------------------
-    demand_last_3d: float = Field(
+    demand_fulfilled_cumulative: float = Field(
         default=0.0,
         ge=0.0,
         description=(
-            "Total actual demand observed over the last 3 days. "
-            "Agent sees consequences of hidden true demand. "
-            "A spike shows up here 1-2 days after it starts."
+            "Cumulative sum of demand_fulfilled_today across all days so far. "
+            "Divide by current_date to get the episode fill rate for this SKU."
         ),
     )
 
-    demand_last_7d: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Total actual demand observed over the last 7 days. "
-            "Provides a stable baseline window for trend detection."
-        ),
-    )
-
-    demand_trend: float = Field(
-        default=0.0,
-        description=(
-            "Demand acceleration signal. "
-            "Computed as: (demand_last_3d / 3) - (demand_last_7d / 7). "
-            "Positive = demand accelerating. Negative = demand decelerating. "
-            "Derived from observable history only — no hidden process leakage."
-        ),
-    )
-
-    stockout_days_if_no_reorder: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Days until stockout if the agent places no new orders today. "
-            "Computed as: inventory_on_hand / (demand_last_3d / 3). "
-            "Does NOT include inbound_expected — honest, conservative estimate. "
-            "Most important urgency signal per SKU."
-        ),
-    )
-
-    coverage_gap_7d: float = Field(
-        default=0.0,
-        description=(
-            "Demand shortfall over the next 7 days. "
-            "Computed as: demand_last_7d - inventory_on_hand. "
-            "Negative = surplus (safe). Positive = shortage incoming. "
-            "Uses observable quantities only — no oracle leakage."
-        ),
-    )
-
-    # -- Layer 3: Current real state (agent observes) -----------------------
-    inventory_on_hand: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Units physically on shelf right now. "
-            "Reduced by true demand each day (agent sees result, not cause). "
-            "Replenished when inbound orders arrive."
-        ),
-    )
-
-    backorders: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Unfilled prescriptions for this SKU. "
-            "Accumulates when inventory_on_hand reaches zero. "
-            "Consequence of past stockouts — directly penalised in reward."
-        ),
-    )
-
-    inbound_expected_3d: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Units the agent has ordered expected to arrive within 3 days. "
-            "Based on last_observed_lead_time — estimate, not guarantee. "
-            "Becomes wrong if supplier disrupts or true lead time extends. "
-            "Agent discovers inaccuracy via orders_overdue signals."
-        ),
-    )
-
-    inbound_expected_7d: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Units the agent has ordered expected to arrive within 7 days. "
-            "Same caveats as inbound_expected_3d — estimate based on history."
-        ),
-    )
+    @field_validator("lead_time_last3_orders")
+    @classmethod
+    def cap_at_three(cls, v: List[float]) -> List[float]:
+        return v[-3:] if len(v) > 3 else v
 
 
 # ---------------------------------------------------------------------------
-# InventoryState  (global warehouse state — the TaskState equivalent)
+# InventoryState
 # ---------------------------------------------------------------------------
 
 class InventoryState(Observation):
-    """
-    Full observable state of the pharmaceutical cold-chain warehouse.
-
-    Sent to the agent as the daily inventory report.
-
-    Structured into three layers per the environment design:
-        Layer 1 (hidden): lives only in PharmaEnvironment._hidden
-        Layer 2 (insights): demand history, service history, alerts
-        Layer 3 (real state): current inventory, budget, capacity
-
-    The agent sees ONLY layers 2 and 3 in the LLM prompt.
-    """
-
-    # -----------------------------------------------------------------------
-    # GLOBAL — Layer 1 identifiers (observable, not random)
-    # -----------------------------------------------------------------------
 
     current_date: int = Field(
         default=0,
         ge=0,
-        description=(
-            "Current day within the episode. 0-indexed. "
-            "Day 0 = first day, day 59 = last day of 60-day episode."
-        ),
+        description="Current day index within the episode. 0-indexed.",
     )
 
-    season_phase: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Position within the seasonal cycle. 0.0 = start, 1.0 = end. "
-            "Drives demand patterns: winter phase elevates paracetamol and vitamins. "
-            "Observable — agent uses it to anticipate seasonal demand shifts."
-        ),
-    )
-
-    # -----------------------------------------------------------------------
-    # GLOBAL — Layer 2: Historical insights (agent observes)
-    # -----------------------------------------------------------------------
-
-    prescription_fill_rate_30d: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Fraction of prescriptions filled on time over the last 30 days. "
-            "Core service-level KPI. Declining = agent is failing. "
-            "Already low = damage done, recovery needed."
-        ),
-    )
-
-    prescription_fill_rate_7d: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Fraction of prescriptions filled on time over the last 7 days. "
-            "Shorter window catches deterioration faster than 30d metric. "
-            "7d < 30d → things are getting worse right now."
-        ),
-    )
-
-    epidemic_alert_flag: bool = Field(
-        default=False,
-        description=(
-            "True when a public health authority alert is active. "
-            "Fires when observed demand trend crosses a threshold — "
-            "based on observable history, not hidden epidemic state. "
-            "Gives agent a 3-5 day warning before demand peak. "
-            "Clears after wave subsides. Re-fires for second wave."
-        ),
-    )
-
-    days_since_epidemic_alert_fired: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Days the epidemic alert has been continuously active. "
-            "0 = alert just fired today (act immediately). "
-            "5+ = alert has been active a while (wave probably near peak). "
-            "Resets to 0 when alert clears between waves."
-        ),
-    )
-
-    supply_disruption_days_last_30d: int = Field(
-        default=0,
-        ge=0,
-        le=30,
-        description=(
-            "Total days any supplier was disrupted over the last 30 days. "
-            "Agent infers whether disruption environment is benign or hostile. "
-            "0 = clean month. 10+ = frequent disruptions, build safety stock."
-        ),
-    )
-
-    # -----------------------------------------------------------------------
-    # GLOBAL — Layer 3: Current real state (agent observes)
-    # -----------------------------------------------------------------------
-
-    procurement_budget_ratio: float = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Remaining procurement budget / total quarterly budget. "
-            "Hard constraint on every reorder decision. "
-            "Reaches 0 → agent cannot place any orders."
-        ),
-    )
-
-    cold_storage_capacity_ratio: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Cold storage currently used / total cold storage capacity. "
-            "Applies only to insulin. Separate scarce resource pool. "
-            "Near 1.0 → cannot receive new insulin orders."
-        ),
-    )
+    # -- Storage pools -------------------------------------------------------
 
     cold_storage_total_capacity: float = Field(
-        ...,
         gt=0.0,
-        description="Total cold storage capacity in units. Fixed for the episode.",
+        description="Maximum units of cold storage available. Fixed for the episode.",
     )
 
     cold_storage_current_capacity: float = Field(
         default=0.0,
         ge=0.0,
-        description="Cold storage units currently occupied by insulin inventory.",
-    )
-
-    ambient_capacity_ratio: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Ambient storage currently used / total ambient storage capacity. "
-            "Applies to all non-cold-chain SKUs. "
-            "Near 1.0 → must deplete stock before placing new orders."
-        ),
+        description="Cold storage units currently occupied across all cold-chain SKUs.",
     )
 
     ambient_storage_total_capacity: float = Field(
-        ...,
         gt=0.0,
-        description="Total ambient storage capacity in units. Fixed for the episode.",
+        description="Maximum units of ambient storage available. Fixed for the episode.",
     )
 
     ambient_storage_current_capacity: float = Field(
         default=0.0,
         ge=0.0,
-        description="Ambient storage units currently occupied.",
+        description="Ambient storage units currently occupied across all non-cold-chain SKUs.",
     )
 
-    cold_chain_integrity_flag: bool = Field(
-        default=True,
+    # -- Inbound orders ------------------------------------------------------
+
+    actual_inbound_orders: List[Tuple[str, float, int]] = Field(
+        default_factory=list,
         description=(
-            "True = cold storage functioning normally. "
-            "False = cold chain breach occurred — all insulin inventory condemned. "
-            "Agent discovers this AFTER breach fires. "
-            "Triggers emergency reorder requirement."
+            "Ground-truth open orders tracked by the environment: (sku_id, quantity, true_arrival_day). "
+            "true_arrival_day is sampled from the hidden lead time distribution at order placement. "
+            "Never exposed directly to the agent — agent only sees expected_inbound_orders."
         ),
     )
 
-    orders_overdue_count: int = Field(
-        default=0,
-        ge=0,
+    expected_inbound_orders: List[Tuple[str, float, int]] = Field(
+        default_factory=list,
         description=(
-            "Number of purchase orders past their expected arrival date. "
-            "Rises when true lead time exceeds historical estimate. "
-            "Signals that inbound_expected figures are unreliable."
+            "Agent-visible inbound orders: (sku_id, quantity, expected_arrival_day). "
+            "expected_arrival_day = order_date + avg_lead_time at time of ordering. "
+            "Will diverge from actual_inbound_orders when true lead times deviate from the average."
         ),
     )
 
-    overdue_qty_total: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "Total units stuck in overdue orders. "
-            "Magnitude companion to orders_overdue_count. "
-            "Large overdue_qty = significant inbound stock at risk."
-        ),
-    )
-
-    # -----------------------------------------------------------------------
-    # Per-SKU states
-    # -----------------------------------------------------------------------
+    # -- Per-SKU states ------------------------------------------------------
 
     skus: Dict[str, SKUState] = Field(
         default_factory=dict,
-        description=(
-            "Per-SKU state indexed by sku_id. "
-            "Each SKUState contains inventory position, demand history, "
-            "urgency signals, and fixed domain parameters."
-        ),
+        description="Per-SKU runtime state keyed by sku_id.",
     )
-
-    # -----------------------------------------------------------------------
-    # Per-supplier states
-    # -----------------------------------------------------------------------
-
-    suppliers: Dict[str, SupplierState] = Field(
+    demand_history:Dict[str, List[float]] = Field(
         default_factory=dict,
+        description="Historical demand data for each SKU keyed by sku_id."
+    )
+    lead_time_history:Dict[str,List[float]] = Field(
+        default_factory=dict,
+        description="Historical lead time data for each SKU keyed by sku_id."
+    )
+
+    # -- Reward tracking (global) --------------------------------------------
+
+    inventory_excess_today: float = Field(
+        default=0.0,
+        ge=0.0,
         description=(
-            "Per-supplier state indexed by supplier_id. "
-            "Each SupplierState contains delivery history and disruption status."
+
+            "range 0 to +ve inf ,0 means no excess inventory, higher values indicate more excess inventory. "
         ),
     )
 
-    # -----------------------------------------------------------------------
-    # Episode metadata
-    # -----------------------------------------------------------------------
+    inventory_excess_cumulative: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "range 0 to +ve inf ,0 means no excess inventory, higher values indicate more excess inventory. "
+            
+        ),
+    )
+
+    # -- Episode metadata ----------------------------------------------------
 
     done: bool = Field(
         default=False,
-        description="True when the episode has ended.",
+        description="True when current_date has reached no_of_days.",
     )
 
     reward: float = Field(
         default=0.0,
-        description="Reward returned by the last step.",
+        description="Reward returned after the last step.",
     )
 
-    last_action_feedback: str = Field(
-        default="Episode started. Review inventory and make your first procurement decision.",
-        description=(
-            "Plain-English result of the last action. "
-            "Tells you what was ordered, what arrived, what was fulfilled, "
-            "and any warnings about overdue orders or disruptions."
-        ),
-    )
-
-    # -----------------------------------------------------------------------
-    # Helpers
-    # -----------------------------------------------------------------------
+    # -- Helpers -------------------------------------------------------------
 
     def get_sku(self, sku_id: str) -> Optional[SKUState]:
         return self.skus.get(sku_id)
 
-    def get_supplier(self, supplier_id: str) -> Optional[SupplierState]:
-        return self.suppliers.get(supplier_id)
+    @property
+    def cold_storage_ratio(self) -> float:
+        return self.cold_storage_current_capacity / self.cold_storage_total_capacity
 
-    def update_capacity_ratios(self) -> None:
-        """Recompute capacity ratios from current capacity values."""
-        if self.cold_storage_total_capacity > 0:
-            self.cold_storage_capacity_ratio = (
-                self.cold_storage_current_capacity / self.cold_storage_total_capacity
+    @property
+    def ambient_storage_ratio(self) -> float:
+        return self.ambient_storage_current_capacity / self.ambient_storage_total_capacity
+
+
+# ---------------------------------------------------------------------------
+# SKUEpisodeConfig
+# ---------------------------------------------------------------------------
+
+class SKUEpisodeConfig(BaseModel):
+
+    sku_id: str = Field(
+        default="sku_123",
+        description="Must match the sku_id used in SKUState and all order tuples."
+    )
+
+    no_of_days: int = Field(
+        default=60,
+        gt=0,
+        description="Episode length in days. All curves must have exactly this many entries.",
+    )
+
+    base_demand: float = Field(
+        gt=0,
+        default=10.0,
+        description=(
+            "Daily demand baseline in units, randomly sampled from a configured range at episode start. "
+            "True daily demand = base_demand * demand_curve[day] + gauss(0, demand_std)."
+        ),
+    )
+
+    demand_curve: List[float] = Field(
+        default_factory=list,
+        description=(
+            "Per-day demand multiplier of length no_of_days. "
+            "1.0 = baseline. >1.0 = spike. <1.0 = trough. "
+            "Used to model seasonal patterns, epidemic waves, and flu seasons."
+        ),
+    )
+
+    demand_std: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Standard deviation of Gaussian noise added to daily demand after curve scaling. "
+            "Controls how noisy demand is around the seasonal mean."
+        ),
+    )
+
+    base_lead_time: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "Baseline supplier lead time in days, randomly sampled from a configured range at episode start. "
+            "True lead time = base_lead_time * lead_time_curve[day] + gauss(0, lead_time_std)."
+        ),
+    )
+
+    lead_time_curve: List[float] = Field(
+        default_factory=list,
+        description=(
+            "Per-day lead time multiplier of length no_of_days. "
+            "1.0 = baseline. >1.0 = supplier under stress. "
+            "Used to model supply chain disruptions and peak-season delays."
+        ),
+    )
+
+    lead_time_std: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Standard deviation of Gaussian noise added to lead time after curve scaling. "
+            "Controls delivery time variability around the seasonal mean."
+        ),
+    )
+
+    cold_storage_required: bool = Field(
+        default=False,
+        description=(
+            "True if this SKU requires refrigerated cold storage. "
+            "Copied into SKUState at episode initialisation."
+        ),
+    )
+ 
+    stockout_penalty: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Per-unit penalty for unmet demand. Copied into SKUState at episode initialisation. "
+            "Encodes medical criticality — insulin >> antiflu >> vitamins."
+        ),
+    )
+ 
+    waste_penalty: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Per-unit penalty for inbound stock rejected due to overflow. "
+            "Copied into SKUState at episode initialisation."
+        ),
+    )
+
+    inbound_risk: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Probability that any given inbound order is lost in transit and never arrives. "
+            "0.0 = all orders arrive. 0.1 = 10% chance of total loss per order. "
+            "Agent only discovers this after the expected arrival date passes with no delivery."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_curve_lengths(self) -> SKUEpisodeConfig:
+        if self.demand_curve and len(self.demand_curve) != self.no_of_days:
+            raise ValueError(
+                f"demand_curve length {len(self.demand_curve)} != no_of_days {self.no_of_days}"
             )
-        if self.ambient_storage_total_capacity > 0:
-            self.ambient_capacity_ratio = (
-                self.ambient_storage_current_capacity / self.ambient_storage_total_capacity
+        if self.lead_time_curve and len(self.lead_time_curve) != self.no_of_days:
+            raise ValueError(
+                f"lead_time_curve length {len(self.lead_time_curve)} != no_of_days {self.no_of_days}"
             )
+        return self
 
-    def update_sku_insights(self, sku_id: str) -> None:
-        """
-        Recompute Layer 2 derived signals for one SKU.
-        Called after inventory or demand history updates.
-        """
-        sku = self.skus.get(sku_id)
-        if sku is None:
-            return
 
-        avg_3d = sku.demand_last_3d / 3.0 if sku.demand_last_3d > 0 else 0.0
-        avg_7d = sku.demand_last_7d / 7.0 if sku.demand_last_7d > 0 else 0.0
+# ---------------------------------------------------------------------------
+# EpisodeConfig  (top-level task definition)
+# ---------------------------------------------------------------------------
 
-        # Demand trend: acceleration signal
-        sku.demand_trend = avg_3d - avg_7d
+class EpisodeConfig(BaseModel):
 
-        # Stockout days: how long current stock lasts at recent demand rate
-        if avg_3d > 0:
-            sku.stockout_days_if_no_reorder = sku.inventory_on_hand / avg_3d
-        else:
-            sku.stockout_days_if_no_reorder = 999.0  # no demand → no stockout risk
+    task_name: str = Field(
+        description="Human-readable task identifier. e.g. 'task1_supply_chain_broken'."
+    )
 
-        # Coverage gap: observable shortfall over 7 days
-        sku.coverage_gap_7d = sku.demand_last_7d - sku.inventory_on_hand
+    no_of_days: int = Field(
+        gt=0,
+        description="Episode length shared across all SKUs.",
+    )
+
+    cold_storage_total_capacity: float = Field(
+        gt=0.0,
+        description="Total cold storage capacity for the episode.",
+    )
+
+    ambient_storage_total_capacity: float = Field(
+        gt=0.0,
+        description="Total ambient storage capacity for the episode.",
+    )
+
+    skus: Dict[str, SKUEpisodeConfig] = Field(
+        description=(
+            "Per-SKU episode configs keyed by sku_id. "
+            "Each entry fully specifies the hidden demand and lead time process for that SKU."
+        ),
+    )
+    initial_inventory: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Initial inventory levels for each SKU keyed by sku_id."
+    )
+
+    @model_validator(mode="after")
+    def validate_sku_days_match(self) -> EpisodeConfig:
+        for sku_id, cfg in self.skus.items():
+            if cfg.no_of_days != self.no_of_days:
+                raise ValueError(
+                    f"SKU '{sku_id}' no_of_days={cfg.no_of_days} != episode no_of_days={self.no_of_days}"
+                )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -555,38 +422,20 @@ class InventoryState(Observation):
 # ---------------------------------------------------------------------------
 
 class PharmaAction(Action):
-    """
-    Agent's daily procurement decision.
 
-    Format: {sku_id: (order_quantity, supplier_id)}
-
-    Example:
-        {
-            "insulin":      (100, "FastPharma"),
-            "paracetamol":  (500, "GlobalMed"),
-        }
-
-    Rules:
-    - Only SKUs in the order dict are ordered. Omitted SKUs = no order today.
-    - order_quantity must be > 0.
-    - supplier_id must be in the supplier's sku_served list.
-    - insulin can only be ordered from cold_chain_certified suppliers.
-    - Order is rejected if budget or capacity constraints are violated.
-    """
-
-    orders: Dict[str, Tuple[float, str]] = Field(
+    orders: Dict[str, float] = Field(
         default_factory=dict,
         description=(
-            "Procurement orders as {sku_id: (order_quantity, supplier_id)}. "
-            "Only include SKUs you want to order today. "
-            "Example: {'insulin': (100, 'FastPharma'), 'paracetamol': (500, 'GlobalMed')}."
+            "Procurement orders for today: {sku_id: order_quantity}. "
+            "Only include SKUs you want to order. Omitted SKUs = no order placed today. "
+            "Quantities must be positive. Orders violating capacity at arrival will be rejected."
         ),
     )
 
     message: str = Field(
         default="",
         description=(
-            "Raw LLM message string. Parsed by the environment "
-            "to extract the orders dict."
+            "Raw LLM output string. Parsed by the environment to extract the orders dict "
+            "when orders is not set directly."
         ),
     )

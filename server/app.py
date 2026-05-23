@@ -19,6 +19,17 @@ Usage:
     python -m server.app
 """
 
+#from OpenEnv.envs.browsergym_env import models
+from pathlib import Path
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent          # .../pharma_coldstorage_env/server
+PACKAGE_ROOT = ROOT.parent                      # .../pharma_coldstorage_env
+sys.path.insert(0, str(ROOT))                   # finds my_env_environment.py
+sys.path.insert(0, str(PACKAGE_ROOT))           # finds models.py, tasks.py, client.py
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:
@@ -27,6 +38,7 @@ except Exception as e:
     ) from e
 
 try:
+   
     from models import InventoryState, PharmaAction
     from my_env_environment import PharmaEnvironment
 except ModuleNotFoundError:

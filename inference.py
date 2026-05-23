@@ -47,12 +47,12 @@ from openai import OpenAI
 
 try:
     from client import PharmaEnvClient
-    from models import InventoryState, PharmaAction
-    from tasks import TASK_CONFIGS, compute_final_score
+    from models import InventoryState, PharmaAction, EpisodeConfig
+    from tasks import TASK_REGISTRY, compute_final_score
 except ImportError:
     from client import PharmaEnvClient
-    from models import InventoryState, PharmaAction
-    from tasks import TASK_CONFIGS, compute_final_score
+    from models import InventoryState, PharmaAction, EpisodeConfig
+    from tasks import TASK_REGISTRY, compute_final_score
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -74,77 +74,59 @@ SUCCESS_THRESHOLD = 0.80
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = textwrap.dedent("""
-    You are an intelligent pharmaceutical warehouse procurement agent.
+    You are a pharmaceutical warehouse procurement agent managing a cold-chain inventory over a multi-day episode.
 
     OBJECTIVE
     ---------
-    Manage a cold-chain warehouse stocking four drugs over a 60-day episode.
     Every day you receive an inventory report and decide what to order.
-    Maximise prescription fill rate while minimising stockouts, waste, and budget overrun.
+    Maximise prescription fill rate while avoiding stockouts, waste, and capacity overflow.
 
     WAREHOUSE
     ---------
     Two storage pools:
-      cold_storage  — refrigerated, scarce, for insulin only.
-      ambient       — standard storage, for all other drugs.
-
-    You cannot place an order if the relevant storage pool is at capacity.
-    You cannot place an order if procurement_budget_ratio is near 0.
-
+      cold_storage  — refrigerated, for cold-chain SKUs only (cold_storage_required = True).
+      ambient       — standard storage, for all other SKUs.
+    Do not order quantities that would exceed available capacity.
+    
     SKUS
     ----
-    Each SKU has:
-      inventory_on_hand        — units physically on shelf right now.
-      inbound_expected_3d      — units you ordered, expected within 3 days (estimate only).
-      inbound_expected_7d      — units you ordered, expected within 7 days (estimate only).
-      demand_last_3d           — actual demand observed over last 3 days.
-      demand_last_7d           — actual demand observed over last 7 days.
-      demand_trend             — (demand_last_3d/3) - (demand_last_7d/7). Positive = accelerating.
-      stockout_days_if_no_reorder — days until stockout if you order nothing today.
-      coverage_gap_7d          — demand_last_7d - inventory_on_hand. Positive = shortage incoming.
-      stockout_penalty         — cost of failing this SKU. Higher = more critical.
-      substitute_coverage_ratio — fraction of demand coverable by substitute. 0.0 = no substitute.
+    Each SKU exposes:
+      inventory_on_hand            — units physically on shelf right now.
+      avg_demand_per_day           — rolling daily demand average. Use for reorder sizing.
+      avg_demand_last_5_days       — recent demand average. Reacts faster to spikes.
+      avg_lead_time                — average days from order placement to arrival.
+      lead_time_last3_orders       — actual lead times of last 3 deliveries. Rising = supply stress.
+      expected_inbound_orders      — your open orders: (sku_id, quantity, expected_arrival_day).
+      stockout_penalty             — criticality of this SKU. Higher = order first.
+      cold_storage_required        — True means this SKU uses the cold storage pool.
 
-    SUPPLIERS
-    ---------
-    Each supplier has:
-      last_observed_lead_time  — days from order to arrival (from most recent delivery).
-      on_time_rate_14d         — fraction of recent orders delivered on time.
-      disruption_active        — True if supplier is currently disrupted.
-      sku_served               — list of SKUs this supplier can fulfill.
-      cold_chain_certified     — must be True to supply insulin.
-      unit_cost                — relative cost. Higher = more expensive.
-      expedite_allowed         — True if emergency fast delivery is possible.
-
-    CRITICAL RULES
+    DECISION RULES
     --------------
-    1. Insulin can ONLY be ordered from cold_chain_certified suppliers (FastPharma only).
-    2. A disrupted supplier cannot receive orders — they will be rejected.
-    3. If cold_chain_integrity_flag = False, insulin is destroyed — order immediately.
-    4. If orders_overdue_count > 0, inbound_expected figures are unreliable.
-    5. If epidemic_alert_flag = True, a demand spike is imminent — pre-stock now.
+    1. Order before stockout_days_if_no_reorder drops below avg_lead_time.
+    2. Higher stockout_penalty SKUs take priority when storage capacity is tight.
+    3. expected_inbound_orders may be inaccurate — true lead times deviate from avg_lead_time.
+    4. Capacity overflow is penalised — do not over-order.
+    5. Use avg_demand_last_5_days to detect short-term demand spikes.
 
-    PRIORITY ORDER (when budget is tight)
-    --------------------------------------
-    insulin (no substitute, life-critical)
-    > bp_medication (chronic patients, serious if missed)
-    > paracetamol (substitute partially available)
-    > vitamins (fully substitutable, lowest penalty)
+    PRIORITY ORDER
+    --------------
+    Higher stockout_penalty = higher priority.
+    insulin (100) > bp_medication (60) > hydroxychloroquine (35) > paracetamol (20) > vitamins (5)
 
-    ACTION FORMAT (FOLLOW EXACT SYNTAX)
-    -------------------------------------
-    Respond with a single JSON object on one line. No extra text.
+    ACTION FORMAT
+    -------------
+    Respond with a JSON object mapping SKU names to order quantities. No extra text.
 
     To place orders:
-        {"insulin": [100, "FastPharma"], "paracetamol": [500, "GlobalMed"]}
+        {"insulin": 100, "paracetamol": 500}
 
     To order nothing today:
         {}
 
     Rules:
     - Only include SKUs you want to order today.
-    - quantity must be a positive number.
-    - Use exact SKU names and supplier names as shown in the inventory report.
+    - Quantities must be positive numbers.
+    - Use exact SKU names as shown in the inventory report.
 """).strip()
 
 # ---------------------------------------------------------------------------
@@ -194,63 +176,31 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
     Layer 1 (hidden) is never included.
     """
     return {
-        "day":          obs.current_date,
-        "season_phase": round(obs.season_phase, 3),
-
-        "service": {
-            "prescription_fill_rate_30d":      round(obs.prescription_fill_rate_30d, 3),
-            "prescription_fill_rate_7d":       round(obs.prescription_fill_rate_7d, 3),
-            "epidemic_alert_flag":             obs.epidemic_alert_flag,
-            "days_since_epidemic_alert_fired": obs.days_since_epidemic_alert_fired,
-            "supply_disruption_days_last_30d": obs.supply_disruption_days_last_30d,
+        "day":  obs.current_date,
+        "storage": {
+            "cold_total":    obs.cold_storage_total_capacity,
+            "cold_used":     round(obs.cold_storage_current_capacity, 1),
+            "cold_ratio":    round(obs.cold_storage_ratio, 3),
+            "ambient_total": obs.ambient_storage_total_capacity,
+            "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
+            "ambient_ratio": round(obs.ambient_storage_ratio, 3),
         },
-
-        "warehouse": {
-            "procurement_budget_ratio":         round(obs.procurement_budget_ratio, 3),
-            "cold_storage_capacity_ratio":      round(obs.cold_storage_capacity_ratio, 3),
-            "cold_storage_total_capacity":      obs.cold_storage_total_capacity,
-            "cold_storage_current_capacity":    round(obs.cold_storage_current_capacity, 1),
-            "ambient_capacity_ratio":           round(obs.ambient_capacity_ratio, 3),
-            "ambient_storage_total_capacity":   obs.ambient_storage_total_capacity,
-            "ambient_storage_current_capacity": round(obs.ambient_storage_current_capacity, 1),
-            "cold_chain_integrity_flag":        obs.cold_chain_integrity_flag,
-            "orders_overdue_count":             obs.orders_overdue_count,
-            "overdue_qty_total":                round(obs.overdue_qty_total, 1),
-        },
-
+        "expected_inbound_orders": obs.expected_inbound_orders,
         "inventory": {
             sku_id: {
-                "name":                        sku.name,
-                "inventory_on_hand":           round(sku.inventory_on_hand, 1),
-                "backorders":                  round(sku.backorders, 1),
-                "inbound_expected_3d":         round(sku.inbound_expected_3d, 1),
-                "inbound_expected_7d":         round(sku.inbound_expected_7d, 1),
-                "cold_storage_required":       sku.cold_storage_required,
-                "demand_last_3d":              round(sku.demand_last_3d, 1),
-                "demand_last_7d":              round(sku.demand_last_7d, 1),
-                "demand_trend":                round(sku.demand_trend, 3),
-                "stockout_days_if_no_reorder": round(sku.stockout_days_if_no_reorder, 1),
-                "coverage_gap_7d":             round(sku.coverage_gap_7d, 1),
-                "stockout_penalty":            sku.stockout_penalty,
-                "substitute_coverage_ratio":   sku.substitute_coverage_ratio,
+                "inventory_on_hand":            round(sku.inventory_on_hand, 1),
+                "avg_demand_per_day":           round(sku.avg_demand_per_day, 2),
+                "avg_demand_last_5_days":       round(sku.avg_demand_last_5_days, 2),
+                "avg_lead_time":                round(sku.avg_lead_time, 1),
+                "lead_time_last3_orders":       sku.lead_time_last3_orders,
+                "stockout_days_if_no_reorder":  round(sku.stockout_days_if_no_reorder, 1),
+                "cold_storage_required":        sku.cold_storage_required,
+                "stockout_penalty":             sku.stockout_penalty,
             }
             for sku_id, sku in obs.skus.items()
         },
 
-        "suppliers": {
-            sup_id: {
-                "last_observed_lead_time": round(sup.last_observed_lead_time, 1),
-                "on_time_rate_14d":        round(sup.on_time_rate_14d, 3),
-                "disruption_active":       sup.disruption_active,
-                "sku_served":              sup.sku_served,
-                "cold_chain_certified":    sup.cold_chain_certified,
-                "unit_cost":               sup.unit_cost,
-                "expedite_allowed":        sup.expedite_allowed,
-            }
-            for sup_id, sup in obs.suppliers.items()
-        },
-
-        "last_action_feedback": obs.last_action_feedback,
+        #"last_action_feedback": obs.last_action_feedback,
     }
 
 
@@ -319,7 +269,7 @@ def build_user_prompt(
 
         --- YOUR PROCUREMENT DECISION ---
         Respond with a single JSON object on one line.
-        To order: {{"sku_name": [quantity, "supplier_name"], ...}}
+        To order: {{"sku_name": quantity, ...}}
         To skip:  {{}}
     """).strip()
 
@@ -361,7 +311,8 @@ def get_llm_action(
 
 async def run_episode(
     client: OpenAI,
-    task_config: Dict[str, Any],
+    task_name: str,
+    episode_config:EpisodeConfig,
 ) -> None:
     """
     Run one full 60-day episode for a single task config.
@@ -380,7 +331,7 @@ async def run_episode(
     Capped at last 10 entries in the prompt to keep context manageable,
     but the full list is retained internally for scoring and debugging.
     """
-    task_name = f"{task_config['task_id']}_{task_config['difficulty']}"
+    task_name = f"{episode_config.task_name}"
 
     if IMAGE_NAME:
         env = await PharmaEnvClient.from_docker_image(IMAGE_NAME)
@@ -400,7 +351,7 @@ async def run_episode(
 
     try:
         # -- Reset with this task's config ----------------------------------
-        result   = await env.reset(task_config=task_config)
+        result   = await env.reset(episode_config=episode_config)
         last_obs = result.observation
 
         # -- Step loop ------------------------------------------------------
@@ -433,7 +384,7 @@ async def run_episode(
             action_history.append((
                 obs_dict["day"],
                 raw_action,
-                last_obs.last_action_feedback,
+                "",
             ))
 
             rewards.append(reward)
@@ -446,7 +397,7 @@ async def run_episode(
 
         # -- Final score ----------------------------------------------------
         if last_obs is not None:
-            score = compute_final_score(rewards, last_obs)
+            score = compute_final_score( last_obs,episode_config)
 
         success = score >= SUCCESS_THRESHOLD
 
@@ -474,21 +425,22 @@ async def main() -> None:
     """
     Entry point.
 
-    Runs all 9 task configs in sequence:
-        supply_chain_broken  (easy → medium → hard)
-        flu_season           (easy → medium → hard)
-        epidemic_two_wave    (easy → medium → hard)
+    Runs all 3 task configs in sequence:
+        supply_chain_broken  
+        flu_season           
+        epidemic_two_wave    
 
     Each task is a separate 60-day episode with its own demand curves,
     supplier stress schedule, and starting inventory.
     """
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    for task_config in TASK_CONFIGS:
+    for task_name,task_fn in TASK_REGISTRY.items():
         try:
-            await run_episode(client=client, task_config=task_config)
+            episode_config = task_fn()
+            await run_episode(client=client, task_name=task_name, episode_config=episode_config)
         except Exception as exc:
-            task_name = f"{task_config['task_id']}_{task_config['difficulty']}"
+            task_name = episode_config.task_name
             print(f"[DEBUG] Task {task_name} failed entirely: {exc}", flush=True)
             log_end(success=False, steps=0, score=0.01, rewards=[])
 

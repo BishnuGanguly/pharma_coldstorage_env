@@ -8,7 +8,7 @@ from openenv.core.client_types import StepResult
 from openenv.core.env_client import EnvClient
 from openenv.core.env_server.types import State
 
-from models import InventoryState, PharmaAction, SKUState, SupplierState
+from models import InventoryState, PharmaAction, SKUState
 
 
 class PharmaEnvClient(EnvClient[PharmaAction, InventoryState, State]):
@@ -21,11 +21,11 @@ class PharmaEnvClient(EnvClient[PharmaAction, InventoryState, State]):
     Example:
         >>> with PharmaEnvClient(base_url="http://localhost:8000") as client:
         ...     result = client.reset()
-        ...     print(result.observation.prescription_fill_rate_30d)
+        ...     print(result.observation.current_date)
         ...
-        ...     action = PharmaAction(orders={"insulin": (100.0, "FastPharma")})
+        ...     action = PharmaAction(orders={"insulin": 100.0})
         ...     result = client.step(action)
-        ...     print(result.observation.last_action_feedback)
+        ...     print(result.observation.skus["insulin"].inventory_on_hand)
     """
 
     def _step_payload(self, action: PharmaAction) -> Dict[str, Any]:
@@ -33,7 +33,7 @@ class PharmaEnvClient(EnvClient[PharmaAction, InventoryState, State]):
         return {
             "message": action.message,
             "orders": {
-                sku_id: list(order)
+                sku_id: order
                 for sku_id, order in action.orders.items()
             },
         }
@@ -71,59 +71,34 @@ class PharmaEnvClient(EnvClient[PharmaAction, InventoryState, State]):
         for sku_id, sku_data in obs_data.get("skus", {}).items():
             skus[sku_id] = SKUState(
                 sku_id=sku_id,
-                name=sku_data.get("name", sku_id),
-                cold_storage_required=sku_data.get("cold_storage_required", False),
-                stockout_penalty=sku_data.get("stockout_penalty", 0.0),
-                substitute_coverage_ratio=sku_data.get("substitute_coverage_ratio", 0.0),
-                inventory_on_hand=sku_data.get("inventory_on_hand", 0.0),
-                backorders=sku_data.get("backorders", 0.0),
-                inbound_expected_3d=sku_data.get("inbound_expected_3d", 0.0),
-                inbound_expected_7d=sku_data.get("inbound_expected_7d", 0.0),
-                demand_last_3d=sku_data.get("demand_last_3d", 0.0),
-                demand_last_7d=sku_data.get("demand_last_7d", 0.0),
-                demand_trend=sku_data.get("demand_trend", 0.0),
+                avg_demand_per_day=sku_data.get("avg_demand_per_day", 0.0),
+                avg_demand_last_5_days=sku_data.get("avg_demand_last_5_days", 0.0),
+                avg_lead_time=sku_data.get("avg_lead_time", 0.0),
+                lead_time_last3_orders=sku_data.get("lead_time_last3_orders", []),
                 stockout_days_if_no_reorder=sku_data.get("stockout_days_if_no_reorder", 999.0),
-                coverage_gap_7d=sku_data.get("coverage_gap_7d", 0.0),
+                cold_storage_required=sku_data.get("cold_storage_required", False),
+                inventory_on_hand=sku_data.get("inventory_on_hand", 0.0),
+                stockout_penalty=sku_data.get("stockout_penalty", 1.0),
+                waste_penalty=sku_data.get("waste_penalty", 0.5),
+                demand_fulfilled_today=sku_data.get("demand_fulfilled_today", 0.0),
+                demand_fulfilled_cumulative=sku_data.get("demand_fulfilled_cumulative", 0.0),  
             )
 
-        suppliers: Dict[str, SupplierState] = {}
-        for sup_id, sup_data in obs_data.get("suppliers", {}).items():
-            suppliers[sup_id] = SupplierState(
-                supplier_id=sup_id,
-                cold_chain_certified=sup_data.get("cold_chain_certified", False),
-                sku_served=list(sup_data.get("sku_served", [])),
-                unit_cost=sup_data.get("unit_cost", 1.0),
-                expedite_allowed=sup_data.get("expedite_allowed", False),
-                expedite_cost_multiplier=sup_data.get("expedite_cost_multiplier", 1.0),
-                last_observed_lead_time=sup_data.get("last_observed_lead_time", 0.0),
-                on_time_rate_14d=sup_data.get("on_time_rate_14d", 1.0),
-                disruption_active=sup_data.get("disruption_active", False),
-            )
+
 
         return InventoryState(
             current_date=obs_data.get("current_date", 0),
-            season_phase=obs_data.get("season_phase", 0.0),
-            prescription_fill_rate_30d=obs_data.get("prescription_fill_rate_30d", 1.0),
-            prescription_fill_rate_7d=obs_data.get("prescription_fill_rate_7d", 1.0),
-            epidemic_alert_flag=obs_data.get("epidemic_alert_flag", False),
-            days_since_epidemic_alert_fired=obs_data.get("days_since_epidemic_alert_fired", 0),
-            supply_disruption_days_last_30d=obs_data.get("supply_disruption_days_last_30d", 0),
-            procurement_budget_ratio=obs_data.get("procurement_budget_ratio", 1.0),
             cold_storage_total_capacity=obs_data.get("cold_storage_total_capacity", 500.0),
             cold_storage_current_capacity=obs_data.get("cold_storage_current_capacity", 0.0),
-            cold_storage_capacity_ratio=obs_data.get("cold_storage_capacity_ratio", 0.0),
             ambient_storage_total_capacity=obs_data.get("ambient_storage_total_capacity", 20000.0),
             ambient_storage_current_capacity=obs_data.get("ambient_storage_current_capacity", 0.0),
-            ambient_capacity_ratio=obs_data.get("ambient_capacity_ratio", 0.0),
-            cold_chain_integrity_flag=obs_data.get("cold_chain_integrity_flag", True),
-            orders_overdue_count=obs_data.get("orders_overdue_count", 0),
-            overdue_qty_total=obs_data.get("overdue_qty_total", 0.0),
+            actual_inbound_orders=obs_data.get("actual_inbound_orders", []),
+            expected_inbound_orders=obs_data.get("expected_inbound_orders", []),
             skus=skus,
-            suppliers=suppliers,
+            demand_history=obs_data.get("demand_history", {}),
+            lead_time_history=obs_data.get("lead_time_history", {}),
+            inventory_excess_today=obs_data.get("inventory_excess_today", 0.0),
+            inventory_excess_cumulative=obs_data.get("inventory_excess_cumulative", 0.0),
             done=payload.get("done", obs_data.get("done", False)),
             reward=payload.get("reward", obs_data.get("reward", 0.0)),
-            last_action_feedback=obs_data.get(
-                "last_action_feedback",
-                "Episode started. Review inventory and make your first procurement decision.",
-            ),
         )
