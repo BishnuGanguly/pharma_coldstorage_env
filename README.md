@@ -112,7 +112,7 @@ Demand is flat across all SKUs. The challenge is entirely supply-side: lead time
 
 The agent that waits for stockout signals will order too late — orders placed after the lead time extends arrive after the stockout.
 
-![Supply Chain Broken — Demand & Lead Times](plots/task1_supply_chain (1).png)
+![Supply Chain Broken — Demand & Lead Times](plots/task1_supply_chain.png)
 
 
 ### Task 2 — Flu Season (`flu_season`)
@@ -123,7 +123,7 @@ A flu outbreak drives a Gaussian demand surge for paracetamol, peaking at day 30
 - Paracetamol lead times also step up during days 30–40 (logistics stress during the peak).
 - The agent must pre-stock before day 30 — ordering at peak demand while lead times are stretched leaves no time for delivery.
 
-![Flu Season — Demand Curves](plots/task2_flu_season (1).png)
+![Flu Season — Demand Curves](plots/task2_flu_season.png)
 
 
 ### Task 3 — Epidemic, Two Waves (`epidemic_two_wave`)
@@ -138,7 +138,7 @@ A two-wave epidemic drives hydroxychloroquine (HCQ) demand through two sequentia
 
 The trough between waves (days 27–40) is a trap: demand is low but the agent must keep ordering because wave 2 is larger and HCQ lead times are long (5–8 day baseline).
 
-![Epidemic Two Wave — HCQ Demand](plots/task3_epidemic (1).png)
+![Epidemic Two Wave — HCQ Demand](plots/task3_epidemic.png)
 
 ---
 
