@@ -71,6 +71,10 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Set PYTHONPATH so imports work correctly
 ENV PYTHONPATH="/app/env:$PYTHONPATH"
 
+# Serve the OpenEnv Gradio Playground at /web (the HF Space opens base_path /web).
+# The benchmark API (/reset, /step, /state, /ws) is unaffected.
+ENV ENABLE_WEB_INTERFACE=true
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1

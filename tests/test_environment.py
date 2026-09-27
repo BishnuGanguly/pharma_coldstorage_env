@@ -133,3 +133,11 @@ def test_full_episode_scores_in_unit_range():
     assert 0.0 <= compute_final_score(state, cfg) <= 1.0
     with pytest.raises(RuntimeError):
         env.step(PharmaAction())
+
+
+def test_orders_accept_json_string():
+    """The /web Playground sends the Orders box as a string."""
+    assert PharmaAction(orders='{"insulin": 25}').orders == {"insulin": 25.0}
+    assert PharmaAction(orders="  ").orders == {}
+    with pytest.raises(ValueError, match="JSON object"):
+        PharmaAction(orders="not json")
