@@ -213,6 +213,19 @@ ENABLE_WEB_INTERFACE=true uv run uvicorn server.app:app --port 8000
 # open http://localhost:8000/web
 ```
 
+### Live dashboard (Custom tab)
+
+Next to the Playground, `/web` has a **Custom** tab that plays a whole episode and redraws charts after every simulated day:
+
+- **Pick** a task, a seed and an agent, then press **Run episode** (**Stop** cancels).
+- **Agents:**
+  - *Baseline*: a simple order-up-to rule. It needs no API key and finishes in seconds.
+  - *LLM agent*: uses the same prompt and action history as `inference.py`, one model call per day, so a 60-day episode makes 60 calls and takes about 1–5 minutes.
+- **Charts:** stock on hand vs. demand, true lead time vs. the agent's estimate, orders and deliveries, step reward, and unmet demand for every SKU and day. **Orange lines are hidden ground truth the agent never sees**, so you can judge its decisions.
+- **Tables:** every agent decision (the model's raw reply and the orders accepted), plus a per-day data table for the selected SKU.
+
+To use the LLM agent on the Hugging Face Space, add your token as a **Secret** named `HF_TOKEN` (Space → Settings → Variables and secrets), or paste a token under *LLM settings* for a single run. Calls go through [Inference Providers](https://huggingface.co/docs/inference-providers) and count against that account's credits. `MODEL_NAME` sets the default model and `API_BASE_URL` points it at any OpenAI-compatible endpoint. Each run uses its own environment, and runs are queued one at a time.
+
 ### Choosing a task on reset
 
 `reset()` accepts either a registered task name or a full config:
@@ -261,6 +274,7 @@ pharma_coldstorage_env/
 ├── openenv.yaml       # Environment manifest
 └── server/
     ├── app.py                 # FastAPI application
+    ├── dashboard.py           # Live dashboard tab at /web (charts + agents)
     └── my_env_environment.py  # Core simulation: demand sampling,
                                # arrivals, overflow, insights, LLM prompt
 ```
