@@ -46,12 +46,22 @@ except ModuleNotFoundError:
     from server.my_env_environment import PharmaEnvironment
 
 
+def build_dashboard(*args):
+    """Live dashboard tab at /web; imported lazily so API-only servers skip it."""
+    try:
+        from dashboard import build_dashboard as _build
+    except ModuleNotFoundError:
+        from server.dashboard import build_dashboard as _build
+    return _build(*args)
+
+
 app = create_app(
     PharmaEnvironment,
     PharmaAction,
     InventoryState,
     env_name="pharma_env",
     max_concurrent_envs=1,
+    gradio_builder=build_dashboard,
 )
 
 
