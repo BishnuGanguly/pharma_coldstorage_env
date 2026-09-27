@@ -7,13 +7,13 @@
 """My Env Environment."""
 
 from .client import PharmaEnvClient
-from .models import InventoryState, PharmaAction, SKUState, SupplierState 
+from .models import EpisodeConfig, InventoryState, PharmaAction, SKUEpisodeConfig, SKUState
 
 __all__ = [
     "PharmaEnvClient",
     "InventoryState",
     "PharmaAction",
     "SKUState",
-    "SupplierState",
-    
+    "EpisodeConfig",
+    "SKUEpisodeConfig",
 ]

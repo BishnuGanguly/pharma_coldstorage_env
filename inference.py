@@ -1,10 +1,10 @@
 """
 inference.py
 ============
-Baseline inference script for the Pharma Cold-Chain Inventory Management Environment.
+Baseline inference script for the Pharma Inventory Management Environment.
 
-Runs all 9 competition tasks (3 scenarios × 3 difficulties) in sequence.
-Each task is a separate 60-day episode defined in tasks.py via TASK_CONFIGS.
+Runs every task in tasks.TASK_REGISTRY (supply_chain_broken, flu_season,
+epidemic_two_wave) in sequence. Each task is a separate 60-day episode.
 
 Environment variables
 ---------------------
@@ -13,6 +13,7 @@ MODEL_NAME         Model identifier  (default: Qwen2.5-72B-Instruct)
 HF_TOKEN           API key
 LOCAL_IMAGE_NAME   Docker image name (used by from_docker_image)
 ENV_BASE_URL       Server URL when not using Docker (default: localhost:8000)
+TASK_SEED          Seed for task generation and environment noise (default: 42)
 
 STDOUT format (mandatory)
 --------------------------
@@ -20,21 +21,18 @@ STDOUT format (mandatory)
 [STEP]  step=<n> action=<action> reward=<0.00> done=<true|false> error=<msg|null>
 [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 
-Score formula
--------------
-    final_score = 0.5 * mean(step_rewards)
-                + 0.3 * prescription_fill_rate_30d
-                + 0.2 * (1 - total_backorder_ratio)
+Score formula (see tasks.compute_final_score)
+---------------------------------------------
+    final_score = (0.6 * mean_sku(sum_days(demand_fulfilled_today))
+                 + 0.4 * sum_days(1 / (1 + units_wasted_today))) / no_of_days
 
 Success = score >= SUCCESS_THRESHOLD (0.80)
 
 Action history
 --------------
-Every LLM call receives the full history of (day, action, feedback) tuples
-from the current episode as a compact JSON array in the user prompt.
-This gives the agent memory of what it ordered, what arrived, and what
-feedback the environment returned — without bloating the context window
-with full state snapshots at every prior step.
+Every LLM call receives the recent (day, action, feedback) history from the
+current episode, where feedback summarises the fill rate per SKU and any
+overflow waste caused by the previous action.
 """
 
 import asyncio
@@ -45,14 +43,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
-try:
-    from client import PharmaEnvClient
-    from models import InventoryState, PharmaAction, EpisodeConfig
-    from tasks import TASK_REGISTRY, compute_final_score
-except ImportError:
-    from client import PharmaEnvClient
-    from models import InventoryState, PharmaAction, EpisodeConfig
-    from tasks import TASK_REGISTRY, compute_final_score
+from client import PharmaEnvClient
+from models import EpisodeConfig, InventoryState, PharmaAction
+from tasks import TASK_REGISTRY, compute_final_score
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -62,9 +55,9 @@ IMAGE_NAME        = os.getenv("LOCAL_IMAGE_NAME")
 API_KEY           = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL      = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME        = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
+TASK_SEED         = int(os.getenv("TASK_SEED", "42"))
 
 BENCHMARK         = "pharma_coldchain_env"
-MAX_STEPS         = 60          # one step per episode day
 TEMPERATURE       = 0.2
 MAX_TOKENS        = 256         # orders can be multi-SKU JSON
 SUCCESS_THRESHOLD = 0.80
@@ -97,6 +90,7 @@ SYSTEM_PROMPT = textwrap.dedent("""
       avg_lead_time                — average days from order placement to arrival.
       lead_time_last3_orders       — actual lead times of last 3 deliveries. Rising = supply stress.
       expected_inbound_orders      — your open orders: (sku_id, quantity, expected_arrival_day).
+      stockout_days_if_no_reorder  — days until stockout at the current demand rate.
       stockout_penalty             — criticality of this SKU. Higher = order first.
       cold_storage_required        — True means this SKU uses the cold storage pool.
 
@@ -144,7 +138,9 @@ def log_step(
     done: bool,
     error: Optional[str],
 ) -> None:
-    error_val = error if error else "null"
+    error_val = " ".join(error.split()) if error else "null"
+    # The log format is line-based: collapse any newlines/indentation from the LLM.
+    action = " ".join(action.split()) or "{}"
     print(
         f"[STEP] step={step} action={action} "
         f"reward={reward:.2f} done={str(done).lower()} error={error_val}",
@@ -199,9 +195,22 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
             }
             for sku_id, sku in obs.skus.items()
         },
-
-        #"last_action_feedback": obs.last_action_feedback,
     }
+
+
+def build_feedback(obs: InventoryState) -> str:
+    """Summarise the outcome of the last step for the agent's action history."""
+    fill = {
+        sku_id: round(sku.demand_fulfilled_today, 2)
+        for sku_id, sku in obs.skus.items()
+    }
+    stockouts = [sku_id for sku_id, f in fill.items() if f < 1.0]
+    return json.dumps({
+        "fill_rate": fill,
+        "short_skus": stockouts,
+        "units_wasted_overflow": round(obs.inventory_excess_today, 1),
+        "reward": round(obs.reward or 0.0, 3),
+    })
 
 
 def build_action_history_str(
@@ -312,15 +321,18 @@ def get_llm_action(
 async def run_episode(
     client: OpenAI,
     task_name: str,
-    episode_config:EpisodeConfig,
+    episode_config: EpisodeConfig,
+    seed: int,
 ) -> None:
     """
-    Run one full 60-day episode for a single task config.
+    Run one full episode for a single task config.
 
     Parameters
     ----------
-    client      : OpenAI — initialised LLM client
-    task_config : dict   — task config from tasks.py (one of TASK_CONFIGS)
+    client         : OpenAI        — initialised LLM client
+    task_name      : str           — task name used in the log lines
+    episode_config : EpisodeConfig — the task definition sent to the server
+    seed           : int           — seed for the environment's demand/lead-time noise
 
     Emits mandatory [START] / [STEP] / [END] log lines to STDOUT.
 
@@ -331,8 +343,6 @@ async def run_episode(
     Capped at last 10 entries in the prompt to keep context manageable,
     but the full list is retained internally for scoring and debugging.
     """
-    task_name = f"{episode_config.task_name}"
-
     if IMAGE_NAME:
         env = await PharmaEnvClient.from_docker_image(IMAGE_NAME)
     else:
@@ -351,11 +361,15 @@ async def run_episode(
 
     try:
         # -- Reset with this task's config ----------------------------------
-        result   = await env.reset(episode_config=episode_config)
+        # The config is sent as plain JSON; the server re-validates it.
+        result   = await env.reset(
+            episode_config=episode_config.model_dump(mode="json"),
+            seed=seed,
+        )
         last_obs = result.observation
 
         # -- Step loop ------------------------------------------------------
-        for step in range(1, MAX_STEPS + 1):
+        for step in range(1, episode_config.no_of_days + 1):
 
             if result.done:
                 break
@@ -384,7 +398,7 @@ async def run_episode(
             action_history.append((
                 obs_dict["day"],
                 raw_action,
-                "",
+                build_feedback(last_obs),
             ))
 
             rewards.append(reward)
@@ -418,29 +432,34 @@ async def run_episode(
         )
 
 # ---------------------------------------------------------------------------
-# Main — run all 9 tasks in sequence
+# Main — run all tasks in sequence
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
     """
     Entry point.
 
-    Runs all 3 task configs in sequence:
-        supply_chain_broken  
-        flu_season           
-        epidemic_two_wave    
+    Runs every task in TASK_REGISTRY in sequence:
+        supply_chain_broken
+        flu_season
+        epidemic_two_wave
 
     Each task is a separate 60-day episode with its own demand curves,
-    supplier stress schedule, and starting inventory.
+    supplier stress schedule, and starting inventory. Tasks are built with
+    TASK_SEED so runs are reproducible.
     """
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    for task_name,task_fn in TASK_REGISTRY.items():
+    for task_name, task_fn in TASK_REGISTRY.items():
         try:
-            episode_config = task_fn()
-            await run_episode(client=client, task_name=task_name, episode_config=episode_config)
+            episode_config = task_fn(TASK_SEED)
+            await run_episode(
+                client=client,
+                task_name=task_name,
+                episode_config=episode_config,
+                seed=TASK_SEED,
+            )
         except Exception as exc:
-            task_name = episode_config.task_name
             print(f"[DEBUG] Task {task_name} failed entirely: {exc}", flush=True)
             log_end(success=False, steps=0, score=0.01, rewards=[])
 

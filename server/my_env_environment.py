@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from random import Random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -16,7 +17,7 @@ from models import (
     SKUEpisodeConfig,
     SKUState,
 )
-from  tasks import compute_step_reward, compute_final_score
+from tasks import compute_step_reward, get_task_config
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +80,9 @@ class PharmaEnvironment(Environment):
         self._episode_id: str = ""
         self._step_count: int = 0
         self._rng: Optional[Random] = None
-        # self._demand_history: Dict[str, List[float]] = {}
-        # self._lead_time_history: Dict[str, List[float]] = {}
+        # Ground-truth open orders: (sku_id, qty, order_day, true_arrival_day).
+        # order_day is kept so the lead time can be revealed on delivery.
+        self._open_orders: List[Tuple[str, float, int, int]] = []
 
     # -----------------------------------------------------------------------
     # Reset
@@ -88,17 +90,32 @@ class PharmaEnvironment(Environment):
 
     def reset(
         self,
-        episode_config: Optional[EpisodeConfig] = None,
         seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        episode_config: Optional[Union[EpisodeConfig, Dict[str, Any]]] = None,
+        task_name: Optional[str] = None,
         **kwargs: Any,
     ) -> InventoryState:
+        """
+        Start a new episode.
+
+        The episode is chosen, in order of precedence, from:
+          - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
+          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`
+          - the built-in default config
+        """
         self._rng = Random(seed)
-        self._episode_id = str(uuid.uuid4())
+        self._episode_id = episode_id or str(uuid.uuid4())
         self._step_count = 0
-        self._episode_config = episode_config or self._default_episode_config()
-        # self._demand_history = {sku_id: [] for sku_id in self._episode_config.skus}#issue
-        # self._lead_time_history = {sku_id: [] for sku_id in self._episode_config.skus}#issue
+        self._open_orders = []
+        if episode_config is not None:
+            self._episode_config = EpisodeConfig.model_validate(episode_config)
+        elif task_name is not None:
+            self._episode_config = get_task_config(task_name, seed)
+        else:
+            self._episode_config = self._default_episode_config()
         self._inventory_state = self._build_initial_state()
+        self._update_insights()
         return self._inventory_state
 
     def _build_initial_state(self) -> InventoryState:
@@ -144,7 +161,7 @@ class PharmaEnvironment(Environment):
             raise RuntimeError("Episode is done. Call reset() to start a new one.")
 
         self._step_count += 1
-        orders = self._parse_action(action)
+        orders = self._sanitize_orders(self._parse_action(action))
         self._handle_action(orders)
         self._inventory_state.reward = compute_step_reward(ts)
         return self._inventory_state
@@ -153,17 +170,41 @@ class PharmaEnvironment(Environment):
     # Parse action
     # -----------------------------------------------------------------------
 
-    def _parse_action(self, action: PharmaAction) -> Dict[str, float]:
+    def _parse_action(self, action: PharmaAction) -> Dict[str, Any]:
         if action.orders:
-            return {k: v for k, v in action.orders.items() if v > 0}
+            return dict(action.orders)
         try:
-            raw = re.search(r"\{.*\}", action.message, re.DOTALL)
+            raw = re.search(r"\{.*\}", action.message or "", re.DOTALL)
             if raw:
                 parsed = json.loads(raw.group())
-                return {k: float(v) for k, v in parsed.items() if isinstance(v, (int, float)) and v > 0}
+                if isinstance(parsed, dict):
+                    # Tolerate a wrapped form such as {"orders": {...}}.
+                    if isinstance(parsed.get("orders"), dict):
+                        parsed = parsed["orders"]
+                    return parsed
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
         return {}
+
+    def _sanitize_orders(self, orders: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Keep only positive, finite quantities for SKUs that exist in this episode.
+        SKU names are matched case-insensitively; numeric strings are accepted.
+        Anything else is dropped rather than crashing the step.
+        """
+        known = {sku_id.lower(): sku_id for sku_id in self._inventory_state.skus}
+        clean: Dict[str, float] = {}
+        for name, qty in orders.items():
+            sku_id = known.get(str(name).strip().lower())
+            if sku_id is None or isinstance(qty, bool):
+                continue
+            try:
+                qty = float(qty)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(qty) and qty > 0:
+                clean[sku_id] = clean.get(sku_id, 0.0) + qty
+        return clean
 
     # -----------------------------------------------------------------------
     # Handle action  (main step logic)
@@ -177,22 +218,21 @@ class PharmaEnvironment(Environment):
         # 1. True demands for today
         true_demands = self._get_true_demands(day)
 
-        # 2. Process inbound arrivals + overflow
-        arriving = [
-            (sku_id, qty, arr_day)
-            for (sku_id, qty, arr_day) in ts.actual_inbound_orders
-            if arr_day <= day
-        ]
-        ts.actual_inbound_orders = [
-            o for o in ts.actual_inbound_orders if o[2] > day
-        ]
+        # 2. Process inbound arrivals + overflow.
+        #    Several orders for the same SKU can land on the same day, so
+        #    quantities are summed per SKU before allocation.
+        arriving = [o for o in self._open_orders if o[3] <= day]
+        self._open_orders = [o for o in self._open_orders if o[3] > day]
+        arriving_qty: Dict[str, float] = {}
+        for sku_id, qty, _, _ in arriving:
+            arriving_qty[sku_id] = arriving_qty.get(sku_id, 0.0) + qty
 
         cold_remaining = ts.cold_storage_total_capacity - ts.cold_storage_current_capacity
         ambient_remaining = ts.ambient_storage_total_capacity - ts.ambient_storage_current_capacity
         avg_demands = {sku_id: ts.skus[sku_id].avg_demand_per_day for sku_id in ts.skus}
 
         accepted, wasted = self._handle_inbound_overflow(
-            [(sku_id, qty) for sku_id, qty, _ in arriving],
+            list(arriving_qty.items()),
             cold_remaining,
             ambient_remaining,
             avg_demands,
@@ -216,22 +256,18 @@ class PharmaEnvironment(Environment):
         # 8. Update expected inbound with avg lead times
         self._update_expected_inbound(orders, day)
 
-        # 9. Update history buffers
+        # 9. Update history buffers. A lead time only becomes observable once
+        #    the order has been delivered, never at order placement.
         for sku_id, demand in true_demands.items():
-            ts = self._inventory_state
             ts.demand_history[sku_id].append(demand)
 
-        for sku_id, lead_time in true_lead_times.items():
-            ts = self._inventory_state
-            ts.lead_time_history[sku_id].append(float(lead_time))
+        for sku_id, _, order_day, arrival_day in sorted(arriving, key=lambda o: o[2]):
+            ts.lead_time_history[sku_id].append(float(arrival_day - order_day))
 
         # 10. Recalculate insights
         self._update_insights()
 
-        # # 11. Recalculate global reward fields
-        # self._update_global_reward_fields(wasted)
-
-        # 12. Recompute storage usage and advance date
+        # 11. Recompute storage usage and advance date
         self._recompute_storage()
         ts.current_date += 1
         if ts.current_date >= cfg.no_of_days:
@@ -363,16 +399,11 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def _update_inventory_excess(self, wasted: Dict[str, float]) -> None:
-        #inventory_excess_cumulative = cumulative(1/1+invenetory_excess_today)
         ts = self._inventory_state
-        #inventory excess today is calculated for step reward , the lower it is the better, 0 means no waste at all.
-        ts.inventory_excess_today = 0.0
-        for sku_id, waste_qty in wasted.items():
-            ts.inventory_excess_today += waste_qty
-
-        #inventory excess cumulative is calculated for episode score , the higher it is the better ,  5 means 5 days of zero waste.
-            
-        ts.inventory_excess_cumulative += (1/(1+ts.inventory_excess_today))
+        # Units rejected today (feeds the step reward; 0 = no waste).
+        ts.inventory_excess_today = sum(wasted.values())
+        # Per-day waste-free score (feeds the episode score; +1 per zero-waste day).
+        ts.inventory_excess_cumulative += 1.0 / (1.0 + ts.inventory_excess_today)
 
     # -----------------------------------------------------------------------
     # Fulfill demands
@@ -403,10 +434,12 @@ class PharmaEnvironment(Environment):
         true_lead_times: Dict[str, int],
         day: int,
     ) -> None:
-        ts = self._inventory_state
         for sku_id, qty in orders.items():
             lead_time = true_lead_times.get(sku_id, 1)
-            ts.actual_inbound_orders.append((sku_id, qty, day + lead_time))
+            self._open_orders.append((sku_id, qty, day, day + lead_time))
+        self._inventory_state.actual_inbound_orders = [
+            (sku_id, qty, arrival_day) for sku_id, qty, _, arrival_day in self._open_orders
+        ]
 
     # -----------------------------------------------------------------------
     # Expected inbound update
@@ -436,10 +469,6 @@ class PharmaEnvironment(Environment):
             sku.avg_demand_per_day = (sum(demand_hist) / len(demand_hist)) if demand_hist else 0.0
             sku.avg_demand_last_5_days = (sum(demand_hist[-5:]) / min(5, len(demand_hist))) if demand_hist else 0.0
 
-            avg_3d = (sum(demand_hist[-3:]) / min(3, len(demand_hist))) if len(demand_hist) >= 1 else 0.0
-            avg_7d = (sum(demand_hist[-7:]) / min(7, len(demand_hist))) if len(demand_hist) >= 1 else 0.0
-            #sku.demand_trend = avg_3d - avg_7d
-
             sku.avg_lead_time = (sum(lead_hist) / len(lead_hist)) if lead_hist else float(self._episode_config.skus[sku_id].base_lead_time)
             sku.lead_time_last3_orders = lead_hist[-3:]
 
@@ -447,17 +476,6 @@ class PharmaEnvironment(Environment):
                 sku.inventory_on_hand / sku.avg_demand_per_day
                 if sku.avg_demand_per_day > 0 else 999.0
             )
-
-    # -----------------------------------------------------------------------
-    # Global reward fields
-    # -----------------------------------------------------------------------
-
-    # def _update_global_reward_fields(self) -> None:
-    #     ts = self._inventory_state
-    #     total_capacity = ts.cold_storage_total_capacity + ts.ambient_storage_total_capacity
-    #     total_inventory = sum(s.inventory_on_hand for s in ts.skus.values())
-    #     ts.inventory_excess_today = max(1.0, total_inventory / total_capacity)
-    #     ts.inventory_excess_cumulative += max(0.0, ts.inventory_excess_today - 1.0)
 
     # -----------------------------------------------------------------------
     # Storage recompute
@@ -507,7 +525,6 @@ class PharmaEnvironment(Environment):
                     "avg_lead_time": round(sku.avg_lead_time, 1),
                     "lead_time_last3_orders": [round(x, 1) for x in sku.lead_time_last3_orders],
                     "stockout_days_if_no_reorder": round(sku.stockout_days_if_no_reorder, 1),
-                    #"demand_trend": round(sku.demand_trend, 3),
                     "cold_storage_required": sku.cold_storage_required,
                     "stockout_penalty": sku.stockout_penalty,
                 }

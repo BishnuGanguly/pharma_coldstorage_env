@@ -129,7 +129,7 @@ async def run_http_client_smoke_test() -> None:
     Requires the FastAPI server to be running locally first.
 
     Terminal:
-        uvicorn app:app --host 127.0.0.1 --port 8000 --reload
+        uvicorn server.app:app --host 127.0.0.1 --port 8000 --reload
     """
     try:
         from client import PharmaEnvClient
@@ -190,5 +190,7 @@ async def run_http_client_smoke_test() -> None:
 if __name__ == "__main__":
     run_direct_environment_smoke_test()
 
-    # Uncomment only after your server is running locally:
-    asyncio.run(run_http_client_smoke_test())
+    # The HTTP test needs a running server, so it is opt-in:
+    #     python smoke_test.py --http
+    if "--http" in sys.argv:
+        asyncio.run(run_http_client_smoke_test())
