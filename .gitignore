@@ -1,2 +1,7 @@
-plots/
-*.png
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/

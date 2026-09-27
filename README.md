@@ -54,7 +54,7 @@ All five SKUs in the current version use ambient storage.
 | `vitamins` | Vitamins | 5 | 60–90 units/day | 1–2 days |
 | `hydroxychloroquine` | Hydroxychloroquine (HCQ) | 35 | 20–40 units/day | 5–8 days |
 
-Base demand and lead times are sampled once at episode start from the ranges above. True daily demand also has Gaussian noise on top of the per-task demand curve.
+Base demand, base lead time and starting inventory (1–5 units, so every episode starts nearly empty) are sampled when the task is built, from the ranges above. Tasks are seeded: the same `seed` always produces the same episode. True daily demand is `base_demand × demand_curve[day]`, plus Gaussian noise when a SKU's `demand_std` is set (the built-in tasks leave it at 0); lead times work the same way with `lead_time_curve` and `lead_time_std`.
 
 ---
 
@@ -69,7 +69,7 @@ Each step the agent receives a full `InventoryState` rendered as a JSON report. 
 | `avg_demand_per_day` | Rolling average demand over all history |
 | `avg_demand_last_5_days` | Short-window average — reacts faster to spikes |
 | `avg_lead_time` | Rolling average delivery time from all past orders |
-| `lead_time_last3_orders` | The last 3 observed lead times — rising values signal supply stress |
+| `lead_time_last3_orders` | Lead times of the last 3 delivered orders — rising values signal supply stress. A lead time only becomes visible once that order arrives |
 | `expected_inbound_orders` | Open orders with estimated arrival day |
 | `stockout_penalty` | Criticality weight for this SKU |
 
@@ -94,7 +94,7 @@ Each day the agent responds with a JSON object mapping SKU names to order quanti
 
 Only include SKUs you want to order. Send `{}` to place no orders today.
 
-The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically.
+The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 
 ---
 
@@ -154,7 +154,7 @@ step_reward = mean(demand_fulfilled_today across all SKUs)
 ```
 
 - `demand_fulfilled_today` per SKU is the fraction of true demand served (0.0 = full stockout, 1.0 = fully served).
-- The excess term penalises waste from overflow arrivals. It is bounded to (0, 1) so it can never make the reward negative by itself.
+- The excess term penalises waste from overflow arrivals. It is bounded to [0, 1), so the step reward lies in (-1, 1].
 
 ### Final Episode Score
 
@@ -185,11 +185,30 @@ final_score = (mean(demand_fulfilled_cumulative across all SKUs) × 0.6
 uv sync
 
 # Start the environment server
-cd server
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Run the benchmark (separate terminal)
-python inference.py
+uv run python inference.py
+```
+
+### Choosing a task on reset
+
+`reset()` accepts either a registered task name or a full config:
+
+```python
+await env.reset(task_name="flu_season", seed=42)
+await env.reset(episode_config=get_task_config("flu_season", seed=42).model_dump(mode="json"))
+```
+
+With neither, a small 30-day two-SKU default episode is used.
+
+### Tests
+
+```bash
+uv pip install pytest
+uv run python -m pytest tests      # unit tests for the simulation
+uv run python smoke_test.py        # direct environment walkthrough
+uv run python smoke_test.py --http # also exercises the client (server must be running)
 ```
 
 ### Environment Variables
@@ -200,6 +219,8 @@ python inference.py
 | `MODEL_NAME` | `Qwen/Qwen2.5-72B-Instruct` | Model identifier |
 | `HF_TOKEN` | — | HuggingFace API key |
 | `ENV_BASE_URL` | `http://localhost:8000` | Server URL |
+| `LOCAL_IMAGE_NAME` | — | Run the server from this Docker image instead of `ENV_BASE_URL` |
+| `TASK_SEED` | `42` | Seed for task generation and environment noise |
 
 ---
 
@@ -214,6 +235,7 @@ pharma_coldstorage_env/
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
 ├── client.py          # OpenEnv async HTTP client (PharmaEnvClient)
 ├── smoke_test.py      # Direct environment test (no server required)
+├── tests/             # pytest unit tests
 ├── openenv.yaml       # Environment manifest
 └── server/
     ├── app.py                 # FastAPI application
