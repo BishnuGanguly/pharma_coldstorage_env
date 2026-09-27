@@ -191,6 +191,28 @@ uv run uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 uv run python inference.py
 ```
 
+### Web Playground
+
+The Docker image sets `ENABLE_WEB_INTERFACE=true`, so the server also serves OpenEnv's Gradio Playground at `/web` (`/` redirects there). On the Hugging Face Space it is the page that opens.
+
+- **Reset** starts a new episode, then **Step** advances one day.
+- Type orders in either box: **Orders** takes a JSON object such as `{"insulin": 40}`, and **Message** takes free text containing one, as an LLM would reply.
+- The raw JSON shows the full `InventoryState`, including ground-truth fields such as `actual_inbound_orders` that the agent's prompt in `inference.py` leaves out.
+- The Reset button takes no parameters, so it loads the small 30-day, two-SKU default episode. To play one of the three tasks, reset through the API and keep using the page:
+
+```bash
+curl -X POST http://localhost:8000/web/reset \
+     -H 'Content-Type: application/json' \
+     -d '{"task_name": "flu_season", "seed": 42}'
+```
+
+To run it locally:
+
+```bash
+ENABLE_WEB_INTERFACE=true uv run uvicorn server.app:app --port 8000
+# open http://localhost:8000/web
+```
+
 ### Choosing a task on reset
 
 `reset()` accepts either a registered task name or a full config:

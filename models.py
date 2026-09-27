@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+import json
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator, model_validator
 from openenv.core.env_server.types import Action, Observation
 
@@ -439,3 +440,16 @@ class PharmaAction(Action):
             "when orders is not set directly."
         ),
     )
+    @field_validator("orders", mode="before")
+    @classmethod
+    def parse_orders_json(cls, v: Any) -> Any:
+        """Accept orders as a JSON string too, as sent by the /web Playground's text box."""
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return {}
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'orders must be a JSON object like {{"insulin": 40}}: {exc}') from None
+        return v
