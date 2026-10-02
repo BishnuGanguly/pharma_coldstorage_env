@@ -24,7 +24,10 @@ STDOUT format (mandatory)
 Score formula (see tasks.compute_final_score)
 ---------------------------------------------
     final_score = (0.6 * mean_sku(sum_days(demand_fulfilled_today))
-                 + 0.4 * sum_days(1 / (1 + units_wasted_today))) / no_of_days
+                 + 0.4 * sum_days(1 - waste_fraction_today)) / no_of_days
+
+    waste_fraction_today is the waste_penalty-weighted share of the day's
+    deliveries rejected because storage was full.
 
 Success = score >= SUCCESS_THRESHOLD (0.80)
 
@@ -92,6 +95,7 @@ SYSTEM_PROMPT = textwrap.dedent("""
       expected_inbound_orders      — your open orders: (sku_id, quantity, expected_arrival_day).
       stockout_days_if_no_reorder  — days until stockout at the current demand rate.
       stockout_penalty             — criticality of this SKU. Higher = order first.
+      waste_penalty                — cost of this SKU's deliveries overflowing storage. Higher = avoid over-ordering it.
       cold_storage_required        — True means this SKU uses the cold storage pool.
 
     DECISION RULES
@@ -99,7 +103,8 @@ SYSTEM_PROMPT = textwrap.dedent("""
     1. Order before stockout_days_if_no_reorder drops below avg_lead_time.
     2. Higher stockout_penalty SKUs take priority when storage capacity is tight.
     3. expected_inbound_orders may be inaccurate — true lead times deviate from avg_lead_time.
-    4. Capacity overflow is penalised — do not over-order.
+    4. Deliveries that do not fit in storage are wasted. The penalty is the share of the
+       delivery lost, weighted by SKU (insulin waste costs the most) — do not over-order.
     5. Use avg_demand_last_5_days to detect short-term demand spikes.
 
     PRIORITY ORDER
@@ -192,6 +197,7 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
                 "stockout_days_if_no_reorder":  round(sku.stockout_days_if_no_reorder, 1),
                 "cold_storage_required":        sku.cold_storage_required,
                 "stockout_penalty":             sku.stockout_penalty,
+                "waste_penalty":                sku.waste_penalty,
             }
             for sku_id, sku in obs.skus.items()
         },
@@ -209,6 +215,7 @@ def build_feedback(obs: InventoryState) -> str:
         "fill_rate": fill,
         "short_skus": stockouts,
         "units_wasted_overflow": round(obs.inventory_excess_today, 1),
+        "waste_fraction": round(obs.waste_fraction_today, 3),
         "reward": round(obs.reward or 0.0, 3),
     })
 

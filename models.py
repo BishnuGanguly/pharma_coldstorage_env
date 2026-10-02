@@ -102,7 +102,7 @@ class SKUState(BaseModel):
         default=0.0,
         ge=0.0,
         description=(
-            "Per-unit penalty applied when inbound stock is rejected due to capacity overflow. "
+            "Weight of this SKU's overflow waste: wasting a high-penalty SKU's delivery costs more. "
             "Reflects the cost of spoilage and wasted procurement spend."
         ),
     )
@@ -211,8 +211,20 @@ class InventoryState(Observation):
         default=0.0,
         ge=0.0,
         description=(
+            "Units of today's deliveries rejected because their storage pool was full. "
+            "0 means nothing was wasted."
+        ),
+    )
 
-            "range 0 to +ve inf ,0 means no excess inventory, higher values indicate more excess inventory. "
+    waste_fraction_today: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Share of today's deliveries rejected for lack of storage, averaged over the SKUs "
+            "that received a delivery and weighted by their waste_penalty. "
+            "0 = everything fit (or nothing arrived), 1 = every delivery was rejected. "
+            "Subtracted from the step reward."
         ),
     )
 
@@ -220,8 +232,8 @@ class InventoryState(Observation):
         default=0.0,
         ge=0.0,
         description=(
-            "range 0 to +ve inf ,0 means no excess inventory, higher values indicate more excess inventory. "
-            
+            "Running sum of (1 - waste_fraction_today): +1 for each day with no waste. "
+            "Feeds 40% of the final score."
         ),
     )
 
@@ -343,7 +355,7 @@ class SKUEpisodeConfig(BaseModel):
         default=0.0,
         ge=0.0,
         description=(
-            "Per-unit penalty for inbound stock rejected due to overflow. "
+            "Weight of this SKU's overflow waste in waste_fraction_today. "
             "Copied into SKUState at episode initialisation."
         ),
     )
