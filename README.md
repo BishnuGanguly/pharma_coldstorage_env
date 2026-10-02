@@ -56,7 +56,14 @@ Insulin is the cold-chain SKU; the other four use ambient storage.
 | `vitamins` | Vitamins | 5 | 0.5 | 60–90 units/day | 1–2 days |
 | `hydroxychloroquine` | Hydroxychloroquine (HCQ) | 35 | 4 | 20–40 units/day | 5–8 days |
 
-Base demand, base lead time and starting inventory (1–5 units, so every episode starts nearly empty) are sampled when the task is built, from the ranges above. Tasks are seeded: the same `seed` always produces the same episode. True daily demand is `base_demand × demand_curve[day]`, plus Gaussian noise when a SKU's `demand_std` is set (the built-in tasks leave it at 0); lead times work the same way with `lead_time_curve` and `lead_time_std`.
+Base demand, base lead time and starting inventory (1–5 units, so every episode starts nearly empty) are sampled when the task is built, from the ranges above. Tasks are seeded: the same `seed` always produces the same episode.
+
+Every day is also a little random:
+
+- **Demand:** true daily demand is `base_demand × demand_curve[day]` plus Gaussian noise with a standard deviation of 12% of base demand (`DEMAND_NOISE_CV` in `tasks.py`).
+- **Lead times:** each order's lead time is `base_lead_time × lead_time_curve[day]` plus Gaussian noise with a standard deviation of 0.75 days (`LEAD_TIME_NOISE_STD`), rounded to whole days and at least 1.
+
+The environment draws all of this noise once, at `reset`, from the seed. The same seed therefore gives the same demand every day, and the same lead time for an order placed on a given day, **whatever the agent does**. That makes comparisons between agents fair, and lets you replay one situation with different actions, e.g. to score several candidate answers for RL training.
 
 ---
 

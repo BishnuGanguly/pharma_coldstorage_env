@@ -82,6 +82,11 @@ class PharmaEnvironment(Environment):
         self._episode_id: str = ""
         self._step_count: int = 0
         self._rng: Optional[Random] = None
+        # The episode's randomness, drawn once at reset as standard-normal values per
+        # SKU and day and scaled by the SKU's std when used. Steps only read these
+        # tables, so the agent's actions can never change the world it faces.
+        self._demand_z: Dict[str, List[float]] = {}
+        self._lead_time_z: Dict[str, List[float]] = {}
         # Ground-truth open orders: (sku_id, qty, order_day, true_arrival_day).
         # order_day is kept so the lead time can be revealed on delivery.
         self._open_orders: List[Tuple[str, float, int, int]] = []
@@ -116,9 +121,22 @@ class PharmaEnvironment(Environment):
             self._episode_config = get_task_config(task_name, seed)
         else:
             self._episode_config = self._default_episode_config()
+        self._draw_world_noise()
         self._inventory_state = self._build_initial_state()
         self._update_insights()
         return self._inventory_state
+
+    def _draw_world_noise(self) -> None:
+        """
+        Deal all of the episode's noise up front from the seeded generator: one
+        demand value per SKU per day, and one lead-time value per SKU per order day.
+        The same seed therefore gives the same demand on every day, and the same
+        lead time for an order placed on a given day, whatever the agent does.
+        """
+        days = self._episode_config.no_of_days
+        skus = list(self._episode_config.skus)
+        self._demand_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
+        self._lead_time_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
 
     def _build_initial_state(self) -> InventoryState:
         cfg = self._episode_config
@@ -284,7 +302,7 @@ class PharmaEnvironment(Environment):
         for sku_id, sku_cfg in self._episode_config.skus.items():
             curve_val = sku_cfg.demand_curve[day] if sku_cfg.demand_curve else 1.0
             mean = sku_cfg.base_demand * curve_val
-            noise = self._rng.gauss(0, sku_cfg.demand_std) if sku_cfg.demand_std > 0 else 0.0
+            noise = sku_cfg.demand_std * self._demand_z[sku_id][day]
             demands[sku_id] = max(0.0, mean + noise)
         return demands
 
@@ -300,7 +318,7 @@ class PharmaEnvironment(Environment):
                 continue
             curve_val = sku_cfg.lead_time_curve[day] if sku_cfg.lead_time_curve else 1.0
             mean = sku_cfg.base_lead_time * curve_val
-            noise = self._rng.gauss(0, sku_cfg.lead_time_std) if sku_cfg.lead_time_std > 0 else 0.0
+            noise = sku_cfg.lead_time_std * self._lead_time_z[sku_id][day]
             lead_times[sku_id] = max(1, round(mean + noise))
         return lead_times
 
