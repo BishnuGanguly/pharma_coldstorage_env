@@ -40,12 +40,11 @@ def combine_curves(curve_a: List[float], curve_b: List[float]) -> List[float]:
 # episode built with the same seed is identical.
 # waste_penalty weights each SKU's share of overflow waste in the reward
 # (see PharmaEnvironment._update_inventory_excess); only ratios matter.
-# All five SKUs currently use ambient storage; cold storage is reserved for
-# future cold-chain SKUs.
+# Insulin is the cold-chain SKU (refrigerated pool); the other four use ambient storage.
 
 SKU_CATALOGUE: Dict[str, Dict] = {
     "insulin": {
-        "cold_storage_required": False,
+        "cold_storage_required": True,
         "stockout_penalty":      100.0,
         "waste_penalty":         10.0,
         "base_demand":           (8, 12),
@@ -87,8 +86,12 @@ SKU_CATALOGUE: Dict[str, Dict] = {
 }
 
 EPISODE_DAYS = 60
-COLD_STORAGE_CAPACITY = 500.0
-AMBIENT_STORAGE_CAPACITY = 25000.0
+# Each storage pool holds this many days of its SKUs' combined base demand.
+# 21 days leaves ~25% headroom over the worst case a perfect-foresight plan
+# needs on any task (about 17 days in flu_season, 12 days for insulin), so
+# good play always fits while hoarding overflows.
+AMBIENT_STORAGE_DAYS = 21.0
+COLD_STORAGE_DAYS = 21.0
 
 
 def _build_episode(
@@ -97,8 +100,15 @@ def _build_episode(
     demand_curves: Dict[str, List[float]],
     lead_time_curves: Dict[str, List[float]],
     duration: int = EPISODE_DAYS,
+    ambient_storage_days: float = AMBIENT_STORAGE_DAYS,
+    cold_storage_days: float = COLD_STORAGE_DAYS,
 ) -> EpisodeConfig:
-    """Assemble an EpisodeConfig from per-SKU curves, sampling base values from the catalogue."""
+    """
+    Assemble an EpisodeConfig from per-SKU curves, sampling base values from the catalogue.
+
+    Each storage pool's capacity is `*_storage_days` times the summed base demand of
+    the SKUs stored in it, so capacity scales with the demand drawn for the episode.
+    """
     skus: Dict[str, SKUEpisodeConfig] = {}
     initial_inventory: Dict[str, float] = {}
     for sku_id, spec in SKU_CATALOGUE.items():
@@ -115,13 +125,19 @@ def _build_episode(
         )
         initial_inventory[sku_id] = rng.uniform(*spec["starting_inventory"])
 
+    # Computed from demand already drawn above: no extra random draws, so the rest
+    # of each seeded episode is unchanged. A pool with no SKUs keeps a token 1 unit
+    # (EpisodeConfig requires positive capacities).
+    cold_demand = sum(c.base_demand for c in skus.values() if c.cold_storage_required)
+    ambient_demand = sum(c.base_demand for c in skus.values() if not c.cold_storage_required)
+
     return EpisodeConfig(
         task_name=task_name,
         no_of_days=duration,
         skus=skus,
         initial_inventory=initial_inventory,
-        cold_storage_total_capacity=COLD_STORAGE_CAPACITY,
-        ambient_storage_total_capacity=AMBIENT_STORAGE_CAPACITY,
+        cold_storage_total_capacity=max(cold_storage_days * cold_demand, 1.0),
+        ambient_storage_total_capacity=max(ambient_storage_days * ambient_demand, 1.0),
     )
 
 
