@@ -298,3 +298,57 @@ def test_hoarding_insulin_overflows_cold_storage():
     assert state.inventory_excess_today > 0
     assert state.waste_fraction_today > 0
     assert state.cold_storage_current_capacity <= state.cold_storage_total_capacity + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Final score = average daily step reward
+# ---------------------------------------------------------------------------
+
+def _play(task_name: str, seed: int, policy):
+    env = PharmaEnvironment()
+    state = env.reset(task_name=task_name, seed=seed)
+    rewards = []
+    while not state.done:
+        state = env.step(PharmaAction(orders=policy(state)))
+        rewards.append(state.reward)
+    return state, env._episode_config, rewards
+
+
+def _order_up_to(state, cover_days: float = 6.0):
+    return {
+        sku_id: sku.avg_demand_per_day * cover_days
+        for sku_id, sku in state.skus.items()
+        if sku.stockout_days_if_no_reorder < cover_days
+    }
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_final_score_is_mean_step_reward(task_name):
+    state, cfg, rewards = _play(task_name, 3, _order_up_to)
+    expected = min(1.0, max(0.0, sum(rewards) / cfg.no_of_days))
+    assert compute_final_score(state, cfg) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_ordering_nothing_scores_about_zero(task_name):
+    """It used to score ~0.40 because waste-free days were credited even with no deliveries."""
+    state, cfg, _ = _play(task_name, 0, lambda s: {})
+    assert compute_final_score(state, cfg) < 0.02
+
+
+def test_reckless_over_ordering_scores_below_sensible_ordering():
+    reckless = lambda s: {k: 10 * v for k, v in _order_up_to(s).items()}
+    sensible = [compute_final_score(*_play("supply_chain_broken", seed, _order_up_to)[:2]) for seed in range(5)]
+    careless = [compute_final_score(*_play("supply_chain_broken", seed, reckless)[:2]) for seed in range(5)]
+    assert sum(careless) < sum(sensible)
+
+
+def test_partial_episode_counts_unplayed_days_as_zero():
+    env = PharmaEnvironment()
+    state = env.reset(task_name="flu_season", seed=1)
+    cfg = env._episode_config
+    rewards = []
+    for _ in range(10):
+        state = env.step(PharmaAction(orders=_order_up_to(state)))
+        rewards.append(state.reward)
+    assert compute_final_score(state, cfg) == pytest.approx(max(0.0, sum(rewards)) / cfg.no_of_days)

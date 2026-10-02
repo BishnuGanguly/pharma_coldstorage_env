@@ -26,7 +26,7 @@ import plotly.graph_objects as go
 
 import inference
 from models import EpisodeConfig, InventoryState, PharmaAction
-from tasks import SKU_CATALOGUE, TASK_REGISTRY
+from tasks import SKU_CATALOGUE, TASK_REGISTRY, average_step_reward
 
 try:
     from my_env_environment import PharmaEnvironment
@@ -200,12 +200,8 @@ def run_episode(task_name: str, seed: int, agent: Any) -> Iterator[EpisodeTrace]
 
 
 def score_so_far(trace: EpisodeTrace) -> float:
-    """compute_final_score over the days played so far (equals the final score at the end)."""
-    state, days = trace.state, len(trace.rows)
-    if days == 0 or not state.skus:
-        return 0.0
-    fulfilled = sum(s.demand_fulfilled_cumulative for s in state.skus.values()) / len(state.skus)
-    return (0.6 * fulfilled + 0.4 * state.inventory_excess_cumulative) / days
+    """The final-score formula over the days played so far (equals the final score at the end)."""
+    return average_step_reward(trace.state, len(trace.rows))
 
 
 # ---------------------------------------------------------------------------

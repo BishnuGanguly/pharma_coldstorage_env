@@ -168,14 +168,14 @@ step_reward = mean(demand_fulfilled_today across all SKUs)
 ### Final Episode Score
 
 ```
-final_score = (mean(demand_fulfilled_cumulative across all SKUs) × 0.6
-            +  inventory_excess_cumulative × 0.4)
-            / no_of_days
+final_score = clip( sum of step rewards / no_of_days , 0, 1 )
+            = clip( mean over days of (mean fill today − waste_fraction_today) , 0, 1 )
 ```
 
-- `demand_fulfilled_cumulative` is the sum of `demand_fulfilled_today` across all days for each SKU.
-- `inventory_excess_cumulative` is the sum of `1 - waste_fraction_today` across all days — each waste-free day adds 1, so a higher value is better.
-- Dividing by `no_of_days` normalises the score to a per-day average.
+- The episode score is simply the **average daily step reward**, so an agent is evaluated on exactly what it is rewarded for each day (useful when training with RL).
+- An agent that orders nothing serves almost no demand and scores about 0. Waste only ever subtracts, so a day without deliveries earns nothing extra.
+- Days not played (an episode cut short) count as 0.
+- `tasks.compute_final_score` rebuilds the sum from running totals in the state: `demand_fulfilled_cumulative` per SKU, and `inventory_excess_cumulative`, which adds `1 − waste_fraction_today` each day.
 
 ---
 

@@ -90,9 +90,8 @@ scoring:
     over the SKUs delivered today (0 if nothing arrived). Range [-1, 1].
 
   final_score_formula: >
-    final_score = (0.6 * mean_over_skus(sum_over_days(demand_fulfilled_today))
-                 + 0.4 * sum_over_days(1 - waste_fraction_today))
-                 / no_of_days
+    final_score = clip(sum_over_days(step_reward) / no_of_days, 0, 1)
+    i.e. the average daily step reward. Ordering nothing scores ~0.
     Range [0, 1].
 
 constraints:

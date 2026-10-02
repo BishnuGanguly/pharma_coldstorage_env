@@ -233,7 +233,7 @@ class InventoryState(Observation):
         ge=0.0,
         description=(
             "Running sum of (1 - waste_fraction_today): +1 for each day with no waste. "
-            "Feeds 40% of the final score."
+            "Days played minus this value is the total waste fraction subtracted from the score."
         ),
     )
 
