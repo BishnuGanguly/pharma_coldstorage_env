@@ -240,8 +240,13 @@ def stock_figure(trace: EpisodeTrace, sku_id: str) -> go.Figure:
     fig = _figure(trace, "Units")
     fig.add_scatter(
         x=list(range(len(curve))), y=[cfg.base_demand * c for c in curve],
-        name="Daily demand (hidden from agent)", mode="lines",
+        name="Expected demand (hidden from agent)", mode="lines",
         line=dict(color=ORANGE, width=2), hovertemplate="%{y:,.0f}",
+    )
+    fig.add_scatter(
+        x=[r["day"] for r in trace.rows], y=[r["skus"][sku_id]["demand"] for r in trace.rows],
+        name="Actual demand (with daily noise)", mode="markers",
+        marker=dict(color=ORANGE, size=5), hovertemplate="%{y:,.0f}",
     )
     fig.add_scatter(
         x=[r["day"] for r in trace.rows], y=[r["skus"][sku_id]["inventory"] for r in trace.rows],

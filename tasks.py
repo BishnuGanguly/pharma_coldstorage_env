@@ -93,6 +93,13 @@ EPISODE_DAYS = 60
 AMBIENT_STORAGE_DAYS = 21.0
 COLD_STORAGE_DAYS = 21.0
 
+# Day-to-day randomness of the built-in tasks. Daily demand varies with a
+# standard deviation of DEMAND_NOISE_CV x base demand, and each order's lead time
+# with LEAD_TIME_NOISE_STD days. The environment draws this noise once per episode
+# from the seed, so it never depends on what the agent does.
+DEMAND_NOISE_CV = 0.12
+LEAD_TIME_NOISE_STD = 0.75
+
 
 def _build_episode(
     task_name: str,
@@ -112,13 +119,16 @@ def _build_episode(
     skus: Dict[str, SKUEpisodeConfig] = {}
     initial_inventory: Dict[str, float] = {}
     for sku_id, spec in SKU_CATALOGUE.items():
+        base_demand = rng.uniform(*spec["base_demand"])
         skus[sku_id] = SKUEpisodeConfig(
             sku_id=sku_id,
             no_of_days=duration,
-            base_demand=rng.uniform(*spec["base_demand"]),
+            base_demand=base_demand,
             demand_curve=demand_curves.get(sku_id) or flat_curve(duration),
+            demand_std=DEMAND_NOISE_CV * base_demand,
             base_lead_time=rng.uniform(*spec["base_lead_time"]),
             lead_time_curve=lead_time_curves.get(sku_id) or flat_curve(duration),
+            lead_time_std=LEAD_TIME_NOISE_STD,
             cold_storage_required=spec["cold_storage_required"],
             stockout_penalty=spec["stockout_penalty"],
             waste_penalty=spec["waste_penalty"],

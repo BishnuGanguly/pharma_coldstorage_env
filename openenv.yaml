@@ -6,8 +6,9 @@ description: >
   (refrigerated cold storage for insulin, ambient for the rest), each sized to
   21 days of its SKUs' base demand. Every day the agent receives an
   inventory report and decides how much of each SKU to order.
-  Demand follows per-task curves and supplier lead times can step up during
-  disruptions. The agent never sees true demand or true lead times — it must
+  Demand follows per-task curves with daily noise, and supplier lead times
+  (also noisy) can step up during disruptions. The noise is drawn once per
+  episode from the seed, so it never depends on the agent's actions. The agent never sees true demand or true lead times — it must
   infer them from observed history and act under uncertainty to maximise
   demand fill rate while avoiding overflow waste.
 version: "1.0.0"

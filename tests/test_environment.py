@@ -352,3 +352,55 @@ def test_partial_episode_counts_unplayed_days_as_zero():
         state = env.step(PharmaAction(orders=_order_up_to(state)))
         rewards.append(state.reward)
     assert compute_final_score(state, cfg) == pytest.approx(max(0.0, sum(rewards)) / cfg.no_of_days)
+
+
+# ---------------------------------------------------------------------------
+# Randomness: on in the tasks, and independent of the agent's actions
+# ---------------------------------------------------------------------------
+
+from tasks import DEMAND_NOISE_CV, LEAD_TIME_NOISE_STD  # noqa: E402
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_tasks_switch_noise_on(task_name):
+    for sku in get_task_config(task_name, seed=2).skus.values():
+        assert sku.demand_std == pytest.approx(DEMAND_NOISE_CV * sku.base_demand)
+        assert sku.lead_time_std == LEAD_TIME_NOISE_STD
+
+
+def test_demand_is_noisy_around_the_curve():
+    state, cfg, _ = _play("supply_chain_broken", 4, lambda s: {})
+    vitamins = cfg.skus["vitamins"]                       # flat demand curve in this task
+    realised = state.demand_history["vitamins"]
+    spread = (sum((d - vitamins.base_demand) ** 2 for d in realised) / len(realised)) ** 0.5
+    assert 0.06 < spread / vitamins.base_demand < 0.18     # about DEMAND_NOISE_CV
+    assert len(set(round(d, 6) for d in realised)) > 50    # not a constant
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_same_seed_same_world_whatever_the_agent_does(task_name):
+    """Regression: lead-time noise used to be drawn only for ordered SKUs, which
+    shifted every later random number, so ordering insulin changed paracetamol demand."""
+    lazy, _, _ = _play(task_name, 9, lambda s: {})
+    busy, _, _ = _play(task_name, 9, lambda s: {k: 3 * v for k, v in _order_up_to(s).items()})
+    assert lazy.demand_history == busy.demand_history
+
+
+def test_lead_time_of_an_order_does_not_depend_on_earlier_orders():
+    def arrival_of_day5_paracetamol_order(seed: int, early_orders: dict) -> int:
+        env = PharmaEnvironment()
+        env.reset(task_name="flu_season", seed=seed)
+        for day in range(6):
+            env.step(PharmaAction(orders=early_orders if day < 5 else {"paracetamol": 100.0}))
+        (arrival,) = [a for sku, _, d, a in env._open_orders if sku == "paracetamol" and d == 5]
+        return arrival
+    # Lead times are whole days, so one seed can match by luck; check many.
+    others = {"insulin": 20.0, "vitamins": 300.0, "bp_medication": 80.0}
+    for seed in range(20):
+        assert arrival_of_day5_paracetamol_order(seed, {}) == arrival_of_day5_paracetamol_order(seed, others), seed
+
+
+def test_different_seeds_give_different_noise():
+    a, _, _ = _play("flu_season", 1, lambda s: {})
+    b, _, _ = _play("flu_season", 2, lambda s: {})
+    assert a.demand_history != b.demand_history
