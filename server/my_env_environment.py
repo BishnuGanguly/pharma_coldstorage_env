@@ -49,13 +49,15 @@ Each SKU exposes:
   lead_time_last3_orders       — recent lead times. Rising values = supply stress.
   expected_inbound_orders      — your open orders with estimated arrival dates.
   stockout_penalty             — criticality of this SKU. Higher = order first.
+  waste_penalty                — cost of this SKU's deliveries overflowing storage. Higher = avoid over-ordering it.
 
 DECISION RULES
 --------------
 1. Order before stockout_days_if_no_reorder drops below avg_lead_time.
 2. Higher stockout_penalty SKUs take priority when capacity or budget is tight.
 3. expected_inbound_orders may be inaccurate if true lead times deviate from the average.
-4. Capacity overflow is penalised — do not over-order.
+4. Deliveries that do not fit in storage are wasted, and the penalty is the share of the
+   delivery lost, weighted by SKU (insulin waste costs the most) — do not over-order.
 
 ACTION FORMAT
 -------------
@@ -242,7 +244,7 @@ class PharmaEnvironment(Environment):
             ts.skus[sku_id].inventory_on_hand += qty
 
         # 3. Update inventory excess with today's waste
-        self._update_inventory_excess(wasted)
+        self._update_inventory_excess(arriving_qty, wasted)
 
         # 4 & 5. Fulfill demands
         self._fulfill_demands(true_demands)
@@ -346,8 +348,10 @@ class PharmaEnvironment(Environment):
         avg_demand_per_day: Dict[str, float],
     ) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
-        Recursively allocates capacity across SKUs proportional to avg daily demand.
-        SKUs whose inbound is below their allocation donate freed capacity back to the pool.
+        Allocates free capacity across SKUs proportional to avg daily demand.
+        SKUs whose inbound fits within their share are accepted in full and the
+        unused part of their share is redistributed; once no remaining SKU fits,
+        each gets its share of what is left. Whatever does not fit is wasted.
         """
         if not orders:
             return {}, {}
@@ -356,37 +360,26 @@ class PharmaEnvironment(Environment):
         if total_inbound <= capacity:
             return dict(orders), {sku_id: 0.0 for sku_id, _ in orders}
 
+        def weight(sku_id: str) -> float:
+            return max(avg_demand_per_day.get(sku_id, 1.0), 1e-9)
+
         accepted: Dict[str, float] = {}
         pending: List[Tuple[str, float]] = list(orders)
-        remaining_capacity = capacity
+        remaining_capacity = max(capacity, 0.0)
 
         while pending and remaining_capacity > 0:
-            total_demand = sum(max(avg_demand_per_day.get(sku_id, 1.0), 1e-9) for sku_id, _ in pending)
-            next_pending: List[Tuple[str, float]] = []
-            freed = 0.0
-
-            for sku_id, qty in pending:
-                demand = max(avg_demand_per_day.get(sku_id, 1.0), 1e-9)
-                ratio = demand / total_demand
-                allocation = ratio * remaining_capacity
-                if qty <= allocation:
-                    accepted[sku_id] = qty
-                    freed += allocation - qty
-                else:
-                    next_pending.append((sku_id, qty))
-
-            remaining_capacity = freed
-            if not next_pending or freed == 0.0:
-                # Allocate remaining capacity to pending SKUs by ratio
-                total_demand = sum(max(avg_demand_per_day.get(sku_id, 1.0), 1e-9) for sku_id, _ in next_pending)
-                for sku_id, qty in next_pending:
-                    demand = max(avg_demand_per_day.get(sku_id, 1.0), 1e-9)
-                    ratio = demand / total_demand
-                    accepted[sku_id] = ratio * remaining_capacity
-                remaining_capacity = 0.0
-                next_pending = []
-
-            pending = next_pending
+            total_weight = sum(weight(sku_id) for sku_id, _ in pending)
+            share = {sku_id: weight(sku_id) / total_weight * remaining_capacity for sku_id, _ in pending}
+            fits = [(sku_id, qty) for sku_id, qty in pending if qty <= share[sku_id]]
+            if not fits:
+                # Nobody fits within their share: everyone gets exactly their share.
+                for sku_id, _ in pending:
+                    accepted[sku_id] = share[sku_id]
+                break
+            for sku_id, qty in fits:
+                accepted[sku_id] = qty
+                remaining_capacity -= qty
+            pending = [(sku_id, qty) for sku_id, qty in pending if qty > share[sku_id]]
 
         wasted = {
             sku_id: qty - accepted.get(sku_id, 0.0)
@@ -398,12 +391,28 @@ class PharmaEnvironment(Environment):
     # Waste tracking
     # -----------------------------------------------------------------------
 
-    def _update_inventory_excess(self, wasted: Dict[str, float]) -> None:
+    def _update_inventory_excess(self, delivered: Dict[str, float], wasted: Dict[str, float]) -> None:
+        """
+        waste_fraction_today = sum(w_i * wasted_i / delivered_i) / sum(w_i)
+        over the SKUs with a delivery today, where w_i is the SKU's waste_penalty.
+        It is 0 when nothing arrived or every weight is 0.
+        """
         ts = self._inventory_state
-        # Units rejected today (feeds the step reward; 0 = no waste).
+        # Units rejected today (reported to the agent; 0 = no waste).
         ts.inventory_excess_today = sum(wasted.values())
+
+        weighted_fraction = 0.0
+        total_weight = 0.0
+        for sku_id, qty in delivered.items():
+            if qty <= 0:
+                continue
+            weight = ts.skus[sku_id].waste_penalty
+            weighted_fraction += weight * min(wasted.get(sku_id, 0.0) / qty, 1.0)
+            total_weight += weight
+        ts.waste_fraction_today = weighted_fraction / total_weight if total_weight > 0 else 0.0
+
         # Per-day waste-free score (feeds the episode score; +1 per zero-waste day).
-        ts.inventory_excess_cumulative += 1.0 / (1.0 + ts.inventory_excess_today)
+        ts.inventory_excess_cumulative += 1.0 - ts.waste_fraction_today
 
     # -----------------------------------------------------------------------
     # Fulfill demands
@@ -527,6 +536,7 @@ class PharmaEnvironment(Environment):
                     "stockout_days_if_no_reorder": round(sku.stockout_days_if_no_reorder, 1),
                     "cold_storage_required": sku.cold_storage_required,
                     "stockout_penalty": sku.stockout_penalty,
+                    "waste_penalty": sku.waste_penalty,
                 }
                 for sku_id, sku in ts.skus.items()
             },

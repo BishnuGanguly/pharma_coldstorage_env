@@ -46,13 +46,13 @@ The hard parts are:
 
 All five SKUs in the current version use ambient storage.
 
-| SKU | Drug | Stockout Penalty | Base Demand | Base Lead Time |
-|---|---|:---:|---|---|
-| `insulin` | Insulin | 100 | 8–12 units/day | 4–6 days |
-| `bp_medication` | Amlodipine | 60 | 40–60 units/day | 2–4 days |
-| `paracetamol` | Paracetamol | 20 | 180–220 units/day | 1–3 days |
-| `vitamins` | Vitamins | 5 | 60–90 units/day | 1–2 days |
-| `hydroxychloroquine` | Hydroxychloroquine (HCQ) | 35 | 20–40 units/day | 5–8 days |
+| SKU | Drug | Stockout Penalty | Waste Penalty | Base Demand | Base Lead Time |
+|---|---|:---:|:---:|---|---|
+| `insulin` | Insulin | 100 | 10 | 8–12 units/day | 4–6 days |
+| `bp_medication` | Amlodipine | 60 | 3 | 40–60 units/day | 2–4 days |
+| `paracetamol` | Paracetamol | 20 | 1 | 180–220 units/day | 1–3 days |
+| `vitamins` | Vitamins | 5 | 0.5 | 60–90 units/day | 1–2 days |
+| `hydroxychloroquine` | Hydroxychloroquine (HCQ) | 35 | 4 | 20–40 units/day | 5–8 days |
 
 Base demand, base lead time and starting inventory (1–5 units, so every episode starts nearly empty) are sampled when the task is built, from the ranges above. Tasks are seeded: the same `seed` always produces the same episode. True daily demand is `base_demand × demand_curve[day]`, plus Gaussian noise when a SKU's `demand_std` is set (the built-in tasks leave it at 0); lead times work the same way with `lead_time_curve` and `lead_time_std`.
 
@@ -79,8 +79,9 @@ Global signals:
 |---|---|
 | `cold_storage_ratio` | Cold pool utilisation (0–1) |
 | `ambient_storage_ratio` | Ambient pool utilisation (0–1) |
-| `inventory_excess_today` | Waste from overflow arrivals today |
-| `inventory_excess_cumulative` | Cumulative waste across the episode |
+| `inventory_excess_today` | Units of today's deliveries rejected because storage was full |
+| `waste_fraction_today` | Share of today's deliveries rejected, weighted by `waste_penalty` (0–1) |
+| `inventory_excess_cumulative` | Sum of `1 - waste_fraction_today` so far (+1 per waste-free day) |
 
 ---
 
@@ -150,11 +151,17 @@ At each step the reward is:
 
 ```
 step_reward = mean(demand_fulfilled_today across all SKUs)
-            - inventory_excess_today / (1 + inventory_excess_today)
+            - waste_fraction_today
 ```
 
 - `demand_fulfilled_today` per SKU is the fraction of true demand served (0.0 = full stockout, 1.0 = fully served).
-- The excess term penalises waste from overflow arrivals. It is bounded to [0, 1), so the step reward lies in (-1, 1].
+- `waste_fraction_today` is the share of the day's deliveries rejected because their storage pool was full. It is computed per SKU that received a delivery, then averaged using each SKU's `waste_penalty` as the weight:
+
+  ```
+  waste_fraction_today = Σ waste_penalty_i × (wasted_i / delivered_i) / Σ waste_penalty_i
+  ```
+
+  It is 0 when nothing arrived, and 1 when every delivery was rejected, so the step reward lies in [-1, 1]. Wasting 1 unit of a 3,000-unit delivery costs almost nothing; wasting half of an insulin delivery costs far more than wasting half of a vitamins delivery.
 
 ### Final Episode Score
 
@@ -165,7 +172,7 @@ final_score = (mean(demand_fulfilled_cumulative across all SKUs) × 0.6
 ```
 
 - `demand_fulfilled_cumulative` is the sum of `demand_fulfilled_today` across all days for each SKU.
-- `inventory_excess_cumulative` is the sum of `1 / (1 + inventory_excess_today)` across all days — higher values mean less daily waste, so a higher score here is better.
+- `inventory_excess_cumulative` is the sum of `1 - waste_fraction_today` across all days — each waste-free day adds 1, so a higher value is better.
 - Dividing by `no_of_days` normalises the score to a per-day average.
 
 ---

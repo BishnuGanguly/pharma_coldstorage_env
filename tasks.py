@@ -38,6 +38,8 @@ def combine_curves(curve_a: List[float], curve_b: List[float]) -> List[float]:
 # ---------------------------------------------------------------------------
 # Ranges are (low, high) and are sampled once per task build, so every
 # episode built with the same seed is identical.
+# waste_penalty weights each SKU's share of overflow waste in the reward
+# (see PharmaEnvironment._update_inventory_excess); only ratios matter.
 # All five SKUs currently use ambient storage; cold storage is reserved for
 # future cold-chain SKUs.
 
@@ -45,6 +47,7 @@ SKU_CATALOGUE: Dict[str, Dict] = {
     "insulin": {
         "cold_storage_required": False,
         "stockout_penalty":      100.0,
+        "waste_penalty":         10.0,
         "base_demand":           (8, 12),
         "base_lead_time":        (4, 6),
         "starting_inventory":    (1, 5),
@@ -52,6 +55,7 @@ SKU_CATALOGUE: Dict[str, Dict] = {
     "paracetamol": {
         "cold_storage_required": False,
         "stockout_penalty":      20.0,
+        "waste_penalty":         1.0,
         "base_demand":           (180, 220),
         "base_lead_time":        (1, 3),
         "starting_inventory":    (1, 5),
@@ -59,6 +63,7 @@ SKU_CATALOGUE: Dict[str, Dict] = {
     "bp_medication": {
         "cold_storage_required": False,
         "stockout_penalty":      60.0,
+        "waste_penalty":         3.0,
         "base_demand":           (40, 60),
         "base_lead_time":        (2, 4),
         "starting_inventory":    (1, 5),
@@ -66,6 +71,7 @@ SKU_CATALOGUE: Dict[str, Dict] = {
     "vitamins": {
         "cold_storage_required": False,
         "stockout_penalty":      5.0,
+        "waste_penalty":         0.5,
         "base_demand":           (60, 90),
         "base_lead_time":        (1, 2),
         "starting_inventory":    (1, 5),
@@ -73,6 +79,7 @@ SKU_CATALOGUE: Dict[str, Dict] = {
     "hydroxychloroquine": {
         "cold_storage_required": False,
         "stockout_penalty":      35.0,
+        "waste_penalty":         4.0,
         "base_demand":           (20, 40),
         "base_lead_time":        (5, 8),
         "starting_inventory":    (1, 5),
@@ -104,6 +111,7 @@ def _build_episode(
             lead_time_curve=lead_time_curves.get(sku_id) or flat_curve(duration),
             cold_storage_required=spec["cold_storage_required"],
             stockout_penalty=spec["stockout_penalty"],
+            waste_penalty=spec["waste_penalty"],
         )
         initial_inventory[sku_id] = rng.uniform(*spec["starting_inventory"])
 
@@ -213,17 +221,16 @@ def get_task_config(task_name: str, seed: Optional[int] = None) -> EpisodeConfig
 
 def compute_step_reward(inventory_state: InventoryState) -> float:
     """
-    step_reward = mean(demand_fulfilled_today over SKUs)
-                - inventory_excess_today / (1 + inventory_excess_today)
+    step_reward = mean(demand_fulfilled_today over SKUs) - waste_fraction_today
 
-    Range is (-1, 1]: the waste term is in [0, 1).
+    waste_fraction_today is the waste_penalty-weighted share of today's
+    deliveries rejected for lack of storage, in [0, 1]. Range is [-1, 1].
     """
     ts = inventory_state
     if not ts.skus:
         return 0.0
     demand_fulfilled = sum(s.demand_fulfilled_today for s in ts.skus.values()) / len(ts.skus)
-    excess = ts.inventory_excess_today
-    return demand_fulfilled - excess / (1.0 + excess)
+    return demand_fulfilled - ts.waste_fraction_today
 
 
 def compute_final_score(
@@ -234,9 +241,9 @@ def compute_final_score(
     final_score = (0.6 * mean(demand_fulfilled_cumulative over SKUs)
                  + 0.4 * inventory_excess_cumulative) / no_of_days
 
-    inventory_excess_cumulative accumulates 1 / (1 + inventory_excess_today)
-    each day inside the environment, so both terms are per-day sums in [0, 1]
-    and the final score lies in [0, 1].
+    inventory_excess_cumulative accumulates 1 - waste_fraction_today each day
+    inside the environment, so both terms are per-day sums in [0, 1] and the
+    final score lies in [0, 1].
     """
     ts = inventory_state
     if not ts.skus:

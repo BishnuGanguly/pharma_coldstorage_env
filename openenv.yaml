@@ -19,10 +19,11 @@ observation_space:
     Global: current_date, cold/ambient storage total and current capacity,
     expected_inbound_orders [(sku_id, quantity, expected_arrival_day)],
     inventory_excess_today (units wasted to overflow today),
+    waste_fraction_today (waste_penalty-weighted share of today's deliveries wasted),
     inventory_excess_cumulative, done, reward.
     Per SKU: inventory_on_hand, avg_demand_per_day, avg_demand_last_5_days,
     avg_lead_time, lead_time_last3_orders (observed on delivery),
-    stockout_days_if_no_reorder, cold_storage_required, stockout_penalty,
+    stockout_days_if_no_reorder, cold_storage_required, stockout_penalty, waste_penalty,
     demand_fulfilled_today, demand_fulfilled_cumulative.
     Hidden from the agent's prompt: true demand, true lead times and the
     task's demand / lead-time curves.
@@ -82,12 +83,14 @@ scoring:
 
   step_reward_formula: >
     step_reward = mean_over_skus(demand_fulfilled_today)
-                - inventory_excess_today / (1 + inventory_excess_today)
-    Range (-1, 1].
+                - waste_fraction_today
+    where waste_fraction_today = sum_i(waste_penalty_i * wasted_i / delivered_i)
+                                 / sum_i(waste_penalty_i)
+    over the SKUs delivered today (0 if nothing arrived). Range [-1, 1].
 
   final_score_formula: >
     final_score = (0.6 * mean_over_skus(sum_over_days(demand_fulfilled_today))
-                 + 0.4 * sum_over_days(1 / (1 + inventory_excess_today)))
+                 + 0.4 * sum_over_days(1 - waste_fraction_today))
                  / no_of_days
     Range [0, 1].
 

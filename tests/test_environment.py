@@ -24,9 +24,38 @@ def _deterministic_config(lead_time: float = 3.0, days: int = 10) -> EpisodeConf
                 base_demand=10.0,
                 base_lead_time=lead_time,
                 stockout_penalty=100.0,
+                waste_penalty=1.0,
             ),
         },
     )
+
+
+def _two_pool_config(insulin_waste_penalty: float = 10.0, vitamins_waste_penalty: float = 0.5) -> EpisodeConfig:
+    """Insulin in cold storage (100 units), vitamins in ambient (1000), both starting empty."""
+    days = 5
+    def sku(sku_id: str, cold: bool, waste_penalty: float) -> SKUEpisodeConfig:
+        return SKUEpisodeConfig(
+            sku_id=sku_id, no_of_days=days, base_demand=1.0, base_lead_time=1.0,
+            cold_storage_required=cold, waste_penalty=waste_penalty,
+        )
+    return EpisodeConfig(
+        task_name="two_pools",
+        no_of_days=days,
+        cold_storage_total_capacity=100.0,
+        ambient_storage_total_capacity=1000.0,
+        skus={
+            "insulin": sku("insulin", True, insulin_waste_penalty),
+            "vitamins": sku("vitamins", False, vitamins_waste_penalty),
+        },
+    )
+
+
+def _deliver(cfg: EpisodeConfig, orders: dict):
+    """Order on day 0; with a 1-day lead time everything arrives on day 1."""
+    env = PharmaEnvironment()
+    env.reset(episode_config=cfg)
+    env.step(PharmaAction(orders=orders))
+    return env.step(PharmaAction())
 
 
 def test_reset_accepts_config_dict():
@@ -141,3 +170,70 @@ def test_orders_accept_json_string():
     assert PharmaAction(orders="  ").orders == {}
     with pytest.raises(ValueError, match="JSON object"):
         PharmaAction(orders="not json")
+
+
+def test_waste_fraction_is_share_of_delivery():
+    cfg = _deterministic_config(lead_time=1.0)
+    cfg.initial_inventory = {"insulin": 0.0}
+    state = _deliver(cfg, {"insulin": 2000.0})   # 1000 fit, 1000 rejected
+    assert state.inventory_excess_today == pytest.approx(1000.0)
+    assert state.waste_fraction_today == pytest.approx(0.5)
+    assert state.reward == pytest.approx(1.0 - 0.5)
+
+
+def test_tiny_overflow_costs_almost_nothing():
+    cfg = _deterministic_config(lead_time=1.0)
+    cfg.initial_inventory = {"insulin": 0.0}
+    state = _deliver(cfg, {"insulin": 1001.0})   # 1 unit of 1001 rejected
+    assert state.inventory_excess_today == pytest.approx(1.0)
+    assert state.waste_fraction_today == pytest.approx(1 / 1001)
+
+
+def test_waste_is_weighted_by_waste_penalty():
+    # Half of the insulin delivery overflows cold storage; vitamins fit.
+    insulin_wasted = _deliver(_two_pool_config(), {"insulin": 200.0, "vitamins": 500.0})
+    assert insulin_wasted.waste_fraction_today == pytest.approx(10.0 * 0.5 / 10.5)
+    # Half of the vitamins delivery overflows ambient storage; insulin fits.
+    vitamins_wasted = _deliver(_two_pool_config(), {"insulin": 50.0, "vitamins": 2000.0})
+    assert vitamins_wasted.waste_fraction_today == pytest.approx(0.5 * 0.5 / 10.5)
+    assert insulin_wasted.reward < vitamins_wasted.reward
+
+
+def test_no_delivery_or_zero_weights_mean_no_waste_penalty():
+    state = _deliver(_two_pool_config(), {})
+    assert state.waste_fraction_today == 0.0
+    unweighted = _deliver(_two_pool_config(0.0, 0.0), {"insulin": 200.0})
+    assert unweighted.inventory_excess_today == pytest.approx(100.0)   # still reported
+    assert unweighted.waste_fraction_today == 0.0
+
+
+def test_cumulative_waste_score_adds_one_minus_fraction():
+    cfg = _deterministic_config(lead_time=1.0)
+    cfg.initial_inventory = {"insulin": 0.0}
+    state = _deliver(cfg, {"insulin": 2000.0})   # day 0: no waste, day 1: half
+    assert state.inventory_excess_cumulative == pytest.approx(1.0 + 0.5)
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_tasks_give_every_sku_a_waste_penalty(task_name):
+    cfg = get_task_config(task_name, seed=0)
+    assert all(sku.waste_penalty > 0 for sku in cfg.skus.values())
+
+
+@pytest.mark.parametrize(
+    "orders, demand, expected_stored",
+    [
+        ([("a", 2000.0)], {"a": 10.0}, {"a": 1000.0}),
+        ([("a", 900.0), ("b", 900.0)], {"a": 10.0, "b": 10.0}, {"a": 500.0, "b": 500.0}),
+        ([("a", 100.0), ("b", 2000.0)], {"a": 10.0, "b": 10.0}, {"a": 100.0, "b": 900.0}),
+        ([("a", 100.0), ("b", 2000.0), ("c", 2000.0)], {"a": 10.0, "b": 10.0, "c": 30.0},
+         {"a": 100.0, "b": 225.0, "c": 675.0}),
+    ],
+)
+def test_overflowing_deliveries_fill_the_free_space(orders, demand, expected_stored):
+    """Regression: oversized deliveries used to be rejected entirely instead of filling free space."""
+    accepted, wasted = PharmaEnvironment()._allocate_pool(orders, 1000.0, demand)
+    assert accepted == pytest.approx(expected_stored)
+    assert sum(accepted.values()) == pytest.approx(1000.0)
+    for sku_id, qty in orders:
+        assert accepted[sku_id] + wasted[sku_id] == pytest.approx(qty)
