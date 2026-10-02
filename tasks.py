@@ -249,20 +249,33 @@ def compute_step_reward(inventory_state: InventoryState) -> float:
     return demand_fulfilled - ts.waste_fraction_today
 
 
+def average_step_reward(inventory_state: InventoryState, days: int) -> float:
+    """
+    Sum of the step rewards earned so far divided by `days`, clipped to [0, 1].
+
+    Rebuilt from the environment's running totals, no extra state needed:
+      sum of mean fill over days  = mean over SKUs of demand_fulfilled_cumulative
+      sum of waste_fraction_today = days played - inventory_excess_cumulative
+                                    (that total adds 1 - waste_fraction_today each day)
+    """
+    ts = inventory_state
+    if days <= 0 or not ts.skus:
+        return 0.0
+    fulfilled = sum(s.demand_fulfilled_cumulative for s in ts.skus.values()) / len(ts.skus)
+    wasted = ts.current_date - ts.inventory_excess_cumulative
+    return min(1.0, max(0.0, (fulfilled - wasted) / days))
+
+
 def compute_final_score(
     inventory_state: InventoryState,
     episode_config: EpisodeConfig,
 ) -> float:
     """
-    final_score = (0.6 * mean(demand_fulfilled_cumulative over SKUs)
-                 + 0.4 * inventory_excess_cumulative) / no_of_days
+    final_score = clip(sum of step rewards / no_of_days, 0, 1)
+                = clip(mean over days of (mean fill - waste_fraction_today), 0, 1)
 
-    inventory_excess_cumulative accumulates 1 - waste_fraction_today each day
-    inside the environment, so both terms are per-day sums in [0, 1] and the
-    final score lies in [0, 1].
+    The episode score is the average daily reward, so an agent is evaluated on
+    exactly what it is rewarded for each step. Ordering nothing scores ~0.
+    Days not played (an episode cut short) count as 0.
     """
-    ts = inventory_state
-    if not ts.skus:
-        return 0.0
-    demand_fulfilled = sum(s.demand_fulfilled_cumulative for s in ts.skus.values()) / len(ts.skus)
-    return (demand_fulfilled * 0.6 + ts.inventory_excess_cumulative * 0.4) / episode_config.no_of_days
+    return average_step_reward(inventory_state, episode_config.no_of_days)

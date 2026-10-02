@@ -23,8 +23,8 @@ STDOUT format (mandatory)
 
 Score formula (see tasks.compute_final_score)
 ---------------------------------------------
-    final_score = (0.6 * mean_sku(sum_days(demand_fulfilled_today))
-                 + 0.4 * sum_days(1 - waste_fraction_today)) / no_of_days
+    final_score = clip(sum_days(step_reward) / no_of_days, 0, 1)
+    step_reward = mean_sku(demand_fulfilled_today) - waste_fraction_today
 
     waste_fraction_today is the waste_penalty-weighted share of the day's
     deliveries rejected because storage was full.
