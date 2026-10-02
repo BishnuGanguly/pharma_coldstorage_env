@@ -3,7 +3,8 @@ description: >
   An OpenEnv-compliant environment for pharmaceutical warehouse procurement.
   An LLM agent manages a warehouse stocking five drugs (insulin, paracetamol,
   bp_medication, vitamins, hydroxychloroquine) across two storage pools
-  (refrigerated cold storage and ambient). Every day the agent receives an
+  (refrigerated cold storage for insulin, ambient for the rest), each sized to
+  21 days of its SKUs' base demand. Every day the agent receives an
   inventory report and decides how much of each SKU to order.
   Demand follows per-task curves and supplier lead times can step up during
   disruptions. The agent never sees true demand or true lead times — it must

@@ -237,3 +237,64 @@ def test_overflowing_deliveries_fill_the_free_space(orders, demand, expected_sto
     assert sum(accepted.values()) == pytest.approx(1000.0)
     for sku_id, qty in orders:
         assert accepted[sku_id] + wasted[sku_id] == pytest.approx(qty)
+
+
+# ---------------------------------------------------------------------------
+# Storage capacity sized from demand
+# ---------------------------------------------------------------------------
+
+from tasks import AMBIENT_STORAGE_DAYS, COLD_STORAGE_DAYS  # noqa: E402
+
+
+def _perfect_foresight_peak(cfg: EpisodeConfig, sku_ids) -> float:
+    """
+    Peak units held by a plan that knows the future and has each day's demand
+    delivered as late as possible (true lead times, no noise in the built-in tasks).
+    This is the least storage any plan that avoids avoidable stockouts can use.
+    """
+    days = cfg.no_of_days
+    held = [0.0] * days
+    for sku_id in sku_ids:
+        sku = cfg.skus[sku_id]
+        demand = [sku.base_demand * m for m in sku.demand_curve]
+        arrivals = [d + max(1, round(sku.base_lead_time * sku.lead_time_curve[d])) for d in range(days)]
+        for t in range(days):
+            feasible = [a for a in arrivals if a <= t]
+            if feasible:
+                for day in range(max(feasible), t + 1):
+                    held[day] += demand[t]
+    return max(held)
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_storage_is_sized_from_demand(task_name):
+    cfg = get_task_config(task_name, seed=5)
+    cold = [s for s in cfg.skus.values() if s.cold_storage_required]
+    ambient = [s for s in cfg.skus.values() if not s.cold_storage_required]
+    assert [s.sku_id for s in cold] == ["insulin"]
+    assert cfg.cold_storage_total_capacity == pytest.approx(COLD_STORAGE_DAYS * sum(s.base_demand for s in cold))
+    assert cfg.ambient_storage_total_capacity == pytest.approx(AMBIENT_STORAGE_DAYS * sum(s.base_demand for s in ambient))
+
+
+@pytest.mark.parametrize("task_name", sorted(TASK_REGISTRY))
+def test_perfect_foresight_plan_fits_in_storage(task_name):
+    """Capacity must never make good play impossible."""
+    for seed in range(50):
+        cfg = get_task_config(task_name, seed)
+        cold = [k for k, s in cfg.skus.items() if s.cold_storage_required]
+        ambient = [k for k, s in cfg.skus.items() if not s.cold_storage_required]
+        assert _perfect_foresight_peak(cfg, cold) <= cfg.cold_storage_total_capacity, seed
+        assert _perfect_foresight_peak(cfg, ambient) <= cfg.ambient_storage_total_capacity, seed
+
+
+def test_hoarding_insulin_overflows_cold_storage():
+    env = PharmaEnvironment()
+    state = env.reset(task_name="flu_season", seed=0)
+    month_of_insulin = 30 * env._episode_config.skus["insulin"].base_demand
+    for _ in range(10):   # lead time is at most ~6 days, so the order lands within 10 days
+        state = env.step(PharmaAction(orders={"insulin": month_of_insulin} if state.current_date == 0 else {}))
+        if state.inventory_excess_today > 0:
+            break
+    assert state.inventory_excess_today > 0
+    assert state.waste_fraction_today > 0
+    assert state.cold_storage_current_capacity <= state.cold_storage_total_capacity + 1e-6

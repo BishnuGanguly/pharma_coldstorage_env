@@ -39,12 +39,14 @@ The hard parts are:
 
 | Pool | Capacity | Used for |
 |---|:---:|---|
-| Cold storage | 500 units | Cold-chain SKUs (reserved for future use) |
-| Ambient storage | 25,000 units | All current SKUs |
+| Cold storage | 21 days of insulin demand (about 170–250 units) | Insulin |
+| Ambient storage | 21 days of the other four SKUs' combined demand (about 6,300–8,600 units) | Paracetamol, BP medication, vitamins, HCQ |
+
+Each pool's capacity is 21 times the summed base demand of the SKUs stored in it, so it scales with the demand drawn for each episode. That is about 25% more than the most a perfect-foresight plan ever needs on any task, so good play always fits, while over-ordering overflows and the excess is wasted (see Scoring). `AMBIENT_STORAGE_DAYS` and `COLD_STORAGE_DAYS` in `tasks.py` set the sizes.
 
 ### SKUs
 
-All five SKUs in the current version use ambient storage.
+Insulin is the cold-chain SKU; the other four use ambient storage.
 
 | SKU | Drug | Stockout Penalty | Waste Penalty | Base Demand | Base Lead Time |
 |---|---|:---:|:---:|---|---|
