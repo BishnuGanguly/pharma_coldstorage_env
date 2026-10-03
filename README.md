@@ -188,9 +188,43 @@ final_score = clip( sum of step rewards / no_of_days , 0, 1 )
 
 ## Baselines
 
-| Model | Supply Chain | Flu Season | Epidemic Two Waves |
+Mean final score on the first 50 test seeds per task (`python eval.py --agent <agent> --split test --episodes 50`), with the 95% confidence interval of the mean:
+
+| Agent | Supply Chain | Flu Season | Epidemic Two Waves |
 |---|:---:|:---:|:---:|
-| *Results to be published post-evaluation* | — | — | — |
+| Order nothing (floor) | 0.002 | 0.002 | 0.002 |
+| Baseline (order-up-to rule) | 0.881 ± 0.005 | 0.905 ± 0.005 | 0.876 ± 0.006 |
+| Oracle (perfect foresight, ceiling) | 0.942 ± 0.002 | 0.942 ± 0.002 | 0.942 ± 0.002 |
+
+The oracle is not 1.0 because episodes start with almost no stock: the first days are lost for every agent until a first delivery can arrive. LLM results are still to be published.
+
+## Evaluating an agent
+
+`eval.py` plays an agent over many seeded episodes and reports the mean score per task. It runs the environment in-process (no server needed), and rule-based agents run in parallel.
+
+```bash
+uv run python eval.py --agent baseline --split test --episodes 50   # -> results/baseline_test_50.jsonl
+uv run python eval.py --agent oracle   --split test --episodes 50
+
+# Any OpenAI-compatible model, e.g. a local Ollama server (no API limits):
+uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost:11434/v1 \
+                      --split test --episodes 10 --save-steps
+```
+
+**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
+
+**Seeds:** `--split train` uses seeds 0–9,999 and `--split test` uses 10,000–19,999, always the first `--episodes` of them. Tune prompts and train models on train seeds only, and report test seeds.
+
+**Output:** one JSON line per episode, with its score, average fill rate, stockout SKU-days, overflow days, units wasted and, for LLMs, how many replies contained no JSON and how many calls failed. `--save-steps` also stores every day's reply and reward.
+
+**Comparing agents:** the same seed gives the same world to every agent, so compare seed by seed:
+
+```bash
+uv run python eval.py --compare results/llm_qwen2.5-3b_test_10.jsonl results/baseline_test_50.jsonl \
+                      --oracle results/oracle_test_50.jsonl
+```
+
+This prints the mean per-seed difference with its 95% confidence interval and, with `--oracle`, the **gap closed**: 0% means as good as the baseline, 100% means as good as perfect foresight. Per-seed differences cancel out each seed's luck; comparing a variant of the baseline against the baseline this way gave a confidence interval about 4× tighter than comparing the two averages.
 
 ---
 
@@ -284,6 +318,8 @@ pharma_coldstorage_env/
 ├── tasks.py           # Task constructors (demand/lead-time curves)
 │                      # + compute_step_reward, compute_final_score
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
+├── agents.py          # Agents: nothing, baseline, oracle, LLM
+├── eval.py            # Evaluate an agent over many seeds; compare agents
 ├── client.py          # OpenEnv async HTTP client (PharmaEnvClient)
 ├── smoke_test.py      # Direct environment test (no server required)
 ├── tests/             # pytest unit tests

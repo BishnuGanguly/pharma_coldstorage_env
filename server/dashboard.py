@@ -14,7 +14,6 @@ simulated day.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -25,6 +24,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 import inference
+from agents import BaselineAgent, History, LLMAgent, baseline_policy  # noqa: F401  (re-exported)
 from models import EpisodeConfig, InventoryState, PharmaAction
 from tasks import SKU_CATALOGUE, TASK_REGISTRY, average_step_reward
 
@@ -56,70 +56,6 @@ INK_MUTED = "#898781"
 GRID = "rgba(137, 135, 129, 0.25)"
 # Single-hue sequential ramp for the unmet-demand heatmap (near-zero recedes).
 UNMET_SCALE = [[0.0, "#e8f1fc"], [0.25, "#9ec5f4"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1.0, "#0d366b"]]
-
-
-# ---------------------------------------------------------------------------
-# Agents
-# ---------------------------------------------------------------------------
-
-History = List[Tuple[int, str, str]]
-
-
-def baseline_policy(obs: InventoryState, safety_days: float = 3.0) -> Dict[str, float]:
-    """
-    Order-up-to policy that uses only what the agent can observe: keep enough
-    stock plus inbound to cover the (most pessimistic) lead time plus a few
-    safety days of recent demand.
-    """
-    inbound: Dict[str, float] = {}
-    for sku_id, qty, _ in obs.expected_inbound_orders:
-        inbound[sku_id] = inbound.get(sku_id, 0.0) + qty
-
-    orders: Dict[str, float] = {}
-    for sku_id, sku in obs.skus.items():
-        demand = max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
-        if demand <= 0:
-            continue
-        lead_time = max([sku.avg_lead_time, *sku.lead_time_last3_orders])
-        shortfall = demand * (lead_time + safety_days) - sku.inventory_on_hand - inbound.get(sku_id, 0.0)
-        if shortfall > 0:
-            orders[sku_id] = round(shortfall)
-    return orders
-
-
-class BaselineAgent:
-    def act(self, obs: InventoryState, history: History) -> Tuple[str, Optional[str]]:
-        return json.dumps(baseline_policy(obs)), None
-
-
-class LLMAgent:
-    """Same prompt and history format as inference.py, one chat call per day."""
-
-    def __init__(self, model: str, api_key: str, base_url: str, client: Any = None) -> None:
-        if client is None:
-            from openai import OpenAI
-
-            client = OpenAI(base_url=base_url, api_key=api_key, timeout=60, max_retries=1)
-        self.client = client
-        self.model = model
-
-    def act(self, obs: InventoryState, history: History) -> Tuple[str, Optional[str]]:
-        obs_dict = inference.observation_to_dict(obs)
-        user_prompt = inference.build_user_prompt(obs_dict, history, step=obs.current_date + 1)
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": inference.SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=inference.TEMPERATURE,
-                max_tokens=inference.MAX_TOKENS,
-            )
-            text = (completion.choices[0].message.content or "").strip()
-            return text or "{}", None
-        except Exception as exc:
-            return "{}", f"{type(exc).__name__}: {exc}"
 
 
 # ---------------------------------------------------------------------------
