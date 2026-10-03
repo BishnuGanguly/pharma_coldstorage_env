@@ -230,6 +230,14 @@ TASK_REGISTRY: Dict[str, Callable[[Optional[int]], EpisodeConfig]] = {
 }
 
 
+# Seed split for evaluation and training. Train (and tune) only on TRAIN_SEEDS;
+# report results on TEST_SEEDS, which a trained model must never have seen.
+# eval.py always takes the first N seeds of a split, so runs are comparable.
+TRAIN_SEEDS = range(0, 10_000)
+TEST_SEEDS = range(10_000, 20_000)
+SEED_SPLITS = {"train": TRAIN_SEEDS, "test": TEST_SEEDS}
+
+
 def get_task_config(task_name: str, seed: Optional[int] = None) -> EpisodeConfig:
     """Build the EpisodeConfig for a registered task."""
     try:
