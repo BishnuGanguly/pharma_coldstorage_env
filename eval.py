@@ -71,7 +71,7 @@ def make_agent(name: str, llm: Optional[Dict[str, str]] = None) -> Agent:
     if name == "llm":
         llm = llm or {}
         return LLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],
-                        timeout=float(llm.get("timeout", 60.0)))
+                        timeout=float(llm.get("timeout", 60.0)), action=llm.get("action", "days"))
     raise ValueError(f"Unknown agent '{name}'. Choose from {AGENTS}.")
 
 
@@ -102,7 +102,11 @@ def run_episode(
     while not obs.done:
         day = obs.current_date
         reply, error = agent.act(obs, history)
-        if not JSON_OBJECT.search(reply):
+        # What the model itself wrote; for the "days" action format `reply` is the
+        # converted order, so check and log the model's own text.
+        model_reply = getattr(agent, "last_model_reply", None)
+        model_reply = reply if model_reply is None else model_reply
+        if not error and not JSON_OBJECT.search(model_reply):
             parse_failures += 1
         if error:
             llm_errors += 1
@@ -117,11 +121,12 @@ def run_episode(
         units_wasted += obs.inventory_excess_today
         history.append((day, reply, inference.build_feedback(obs)))
         if on_day is not None:
-            on_day(day, reply)
+            on_day(day, model_reply)
         if save_steps:
             steps.append({
                 "day": day,
-                "reply": reply,
+                "reply": model_reply,
+                "orders_sent": reply,
                 "error": error,
                 "reward": round(obs.reward, 4),
                 "fill": {k: round(s.demand_fulfilled_today, 3) for k, s in obs.skus.items()},
@@ -132,6 +137,7 @@ def run_episode(
     record: Dict[str, Any] = {
         "agent": agent_name,
         "model": (llm or {}).get("model") if agent_name == "llm" else None,
+        "action_format": getattr(agent, "action", None),
         "task": task_name,
         "seed": seed,
         "split": split,
@@ -284,6 +290,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--api-key", default=None, help="llm: API key (default: HF_TOKEN / API_KEY env var)")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="llm: seconds per model call (raise for large local models on a CPU)")
+    parser.add_argument("--action", choices=inference.ACTION_FORMATS, default="days",
+                        help="llm: answer in days of stock per SKU (converted to units) or in units")
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("CANDIDATE", "REFERENCE"),
                         help="compare two result files seed by seed instead of running")
     parser.add_argument("--oracle", type=Path, help="with --compare: oracle results, to report gap closed")
@@ -306,7 +314,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.agent == "llm":
         # Local servers such as Ollama ignore the key, but the client needs a non-empty one.
         api_key = args.api_key or os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "not-needed"
-        llm = {"model": args.model, "base_url": args.base_url, "api_key": api_key, "timeout": args.timeout}
+        llm = {"model": args.model, "base_url": args.base_url, "api_key": api_key,
+               "timeout": args.timeout, "action": args.action}
     workers = args.workers or (1 if args.agent == "llm" else min(os.cpu_count() or 1, 8))
 
     records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps)

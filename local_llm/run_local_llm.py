@@ -141,7 +141,10 @@ def print_report(llm_records, baseline_records, oracle_records, show: int) -> No
         print(f"\n=== First {show} replies ({first['task']}, seed {first['seed']}) ===")
         for step in first["steps"][:show]:
             reply = " ".join(step["reply"].split())
-            print(f"day {step['day']:2d}  reward {step['reward']:+.2f}  {reply[:110]}")
+            line = f"day {step['day']:2d}  reward {step['reward']:+.2f}  model: {reply[:90]}"
+            if step.get("orders_sent") and step["orders_sent"] != step["reply"]:
+                line += f"\n{'':21s}units sent: {step['orders_sent'][:90]}"
+            print(line)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -152,6 +155,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--model", default=None,
                         help="model name on the server, to skip the pharma-<base-model> copy (e.g. a non-Ollama server)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds allowed per model call")
+    parser.add_argument("--action", choices=("days", "units"), default="days",
+                        help="the model answers in days of stock per SKU (converted to units; default) or in units")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible endpoint")
     parser.add_argument("--tasks", default="flu_season", help="comma-separated task names, or 'all'")
     parser.add_argument("--episodes", type=int, default=1, help="seeds per task")
@@ -171,9 +176,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         setup(args.base_model, model)
     hint = "--setup" + ("" if args.base_model == DEFAULT_BASE_MODEL else f" --base-model {args.base_model}")
     check_server(args.base_url, model, setup_hint=hint)
-    llm = {"model": model, "base_url": args.base_url, "api_key": "not-needed", "timeout": args.timeout}
+    llm = {"model": model, "base_url": args.base_url, "api_key": "not-needed",
+           "timeout": args.timeout, "action": args.action}
 
-    print(f"Model {model} at {args.base_url}: {len(tasks)} task(s) x {len(seeds)} seed(s) "
+    print(f"Model {model} at {args.base_url}, answering in {args.action}: {len(tasks)} task(s) x {len(seeds)} seed(s) "
           f"= {len(tasks) * len(seeds) * 60} model calls\n", flush=True)
     llm_records = run_llm(tasks, seeds, args.split, llm)
     baseline_records = [E.run_episode("baseline", t, s, split=args.split) for t in tasks for s in seeds]

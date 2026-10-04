@@ -70,7 +70,7 @@ def test_llm_agent_runs_through_eval(monkeypatch):
         message = SimpleNamespace(content='Restocking.\n```json\n{"paracetamol": 400}\n```')
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    use_agent(monkeypatch, lambda: LLMAgent(model="stub", api_key="x", base_url="x", client=client))
+    use_agent(monkeypatch, lambda: LLMAgent(model="stub", api_key="x", base_url="x", client=client, action="units"))
     record = E.run_episode("custom", "flu_season", TEST_SEED, save_steps=True)
     assert record["parse_failures"] == 0 and record["llm_errors"] == 0
     assert record["score"] > 0.02

@@ -99,7 +99,7 @@ def run_episode(task_name: str, seed: int, agent: Any) -> Iterator[EpisodeTrace]
         trace.state = obs
         trace.rows.append({
             "day": day,
-            "reply": reply,
+            "reply": getattr(agent, "last_model_reply", None) or reply,
             "error": error,
             "orders": {sku_id: qty for sku_id, qty, _, _ in placed},
             "reward": obs.reward,

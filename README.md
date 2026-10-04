@@ -106,6 +106,14 @@ Only include SKUs you want to order. Send `{}` to place no orders today.
 
 The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the dashboard and `PharmaEnvironment.to_llm_prompt()`) shows the report one SKU per line and adds two values computed from the observation: `inbound_units` (already ordered, not yet arrived) and `days_of_cover` ((on hand + inbound) ÷ recent daily demand). It shows the results of the last 3 days but not the model's own earlier replies, and its instructions contain no example quantities: small models tend to copy either one instead of reading the report.
 
+**Two action formats for LLM agents.** By default (`action="days"` in `agents.LLMAgent`, `--action days` in `eval.py` and `local_llm/run_local_llm.py`) the model does not write units. It answers with the **days of stock** it wants per SKU, e.g. `{"paracetamol": 8, "insulin": 6}`, and `inference.days_to_units()` turns that into an order using only observed values:
+
+```
+units ordered = days x recent daily demand - inventory_on_hand - inbound_units
+```
+
+Recent daily demand is the larger of `avg_demand_last_5_days` and `avg_demand_per_day`. Days are capped at 30, and orders under one unit are dropped. The model decides *how much cover* it wants; the arithmetic, which small models get wrong, is done in code. With `--action units` the model writes units itself, using `SYSTEM_PROMPT` (the format `inference.py` and the benchmark use). For example, Gemma 2 2B scored 0.24 in units mode, mostly because it copied the report's small numbers as order sizes.
+
 The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 
 ---
@@ -212,6 +220,8 @@ uv run python eval.py --agent oracle   --split test --episodes 50
 uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost:11434/v1 \
                       --split test --episodes 10 --save-steps
 ```
+
+LLM agents answer in days of stock by default; add `--action units` to have the model write units itself (see the LLM prompt notes above). With `--save-steps`, each step stores the model's own reply (`reply`) and the units actually sent (`orders_sent`).
 
 **Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Gemma 2 2B (or any other Ollama model) with Ollama, and one runs it against the baseline and oracle on the same seeds.
 
