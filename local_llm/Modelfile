@@ -1,0 +1,7 @@
+# Qwen2.5 1.5B Instruct for the Pharma environment.
+# The environment's prompts reach about 2,700 tokens by mid-episode (rules +
+# today's report + 10 days of history). Ollama may cut prompts longer than its
+# default context window from the start, losing the rules and output format,
+# so the context is raised to 8,192 tokens.
+FROM qwen2.5:1.5b
+PARAMETER num_ctx 8192
