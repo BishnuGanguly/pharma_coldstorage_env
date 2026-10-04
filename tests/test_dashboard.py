@@ -37,9 +37,9 @@ class StubCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
-def stub_llm(reply=None, error=None) -> LLMAgent:
+def stub_llm(reply=None, error=None, action="units") -> LLMAgent:
     client = SimpleNamespace(chat=SimpleNamespace(completions=StubCompletions(reply, error)))
-    return LLMAgent(model="stub", api_key="unused", base_url="unused", client=client)
+    return LLMAgent(model="stub", api_key="unused", base_url="unused", client=client, action=action)
 
 
 def last(frames):

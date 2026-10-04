@@ -37,10 +37,13 @@ class FakeOllama(BaseHTTPRequestHandler):
         prompt = request["messages"][-1]["content"]
         start = prompt.index("{", prompt.index("TODAY'S INVENTORY REPORT"))
         report, _ = json.JSONDecoder().raw_decode(prompt[start:])
-        orders = {
-            sku: round(max(d["avg_demand_per_day"], 1) * (d["avg_lead_time"] + 3) - d["inventory_on_hand"])
-            for sku, d in report["inventory"].items()
-        }
+        if "DAYS OF STOCK" in request["messages"][0]["content"]:
+            orders = {sku: round(d["avg_lead_time"] + 3, 1) for sku, d in report["inventory"].items()}
+        else:
+            orders = {
+                sku: round(max(d["avg_demand_per_day"], 1) * (d["avg_lead_time"] + 3) - d["inventory_on_hand"])
+                for sku, d in report["inventory"].items()
+            }
         text = "Restocking.\n```json\n" + json.dumps({k: v for k, v in orders.items() if v > 0}) + "\n```"
         self._send({"id": "x", "object": "chat.completion", "created": 0, "model": request["model"],
                     "choices": [{"index": 0, "finish_reason": "stop",

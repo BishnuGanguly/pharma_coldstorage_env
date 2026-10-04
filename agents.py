@@ -132,31 +132,57 @@ class OracleAgent(Agent):
 # ---------------------------------------------------------------------------
 
 class LLMAgent(Agent):
-    """Same prompt and history format as inference.py, one chat call per day."""
+    """
+    One chat call per day, with the prompt and history format from inference.py.
 
-    def __init__(self, model: str, api_key: str, base_url: str, client: Any = None, timeout: float = 60.0) -> None:
+    action="days" (default): the model answers with days of stock wanted per SKU, and
+    inference.days_to_units() converts that into units before the order is sent. Small
+    models judge "how much cover" far better than they do the arithmetic for units.
+    action="units": the model writes units directly (the benchmark's native format).
+
+    `last_model_reply` keeps the model's own text for logging; act() returns the order
+    actually sent to the environment.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str,
+        client: Any = None,
+        timeout: float = 60.0,
+        action: str = "days",
+    ) -> None:
         """timeout: seconds per call. Raise it for large models on a CPU, where one call can take minutes."""
+        if action not in inference.ACTION_FORMATS:
+            raise ValueError(f"action must be one of {inference.ACTION_FORMATS}, not {action!r}")
         if client is None:
             from openai import OpenAI
 
             client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=1)
         self.client = client
         self.model = model
+        self.action = action
+        self.last_model_reply = ""
 
     def act(self, obs: InventoryState, history: History) -> Tuple[str, Optional[str]]:
         obs_dict = inference.observation_to_dict(obs)
-        user_prompt = inference.build_user_prompt(obs_dict, history, step=obs.current_date + 1)
+        user_prompt = inference.build_user_prompt(obs_dict, history, step=obs.current_date + 1, action=self.action)
+        self.last_model_reply = ""
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": inference.SYSTEM_PROMPT},
+                    {"role": "system", "content": inference.system_prompt(self.action)},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=inference.TEMPERATURE,
                 max_tokens=inference.MAX_TOKENS,
             )
             text = (completion.choices[0].message.content or "").strip()
-            return text or "{}", None
         except Exception as exc:
             return "{}", f"{type(exc).__name__}: {exc}"
+        self.last_model_reply = text
+        if self.action == "days":
+            return json.dumps(inference.days_to_units(obs, inference.parse_json_object(text))), None
+        return text or "{}", None

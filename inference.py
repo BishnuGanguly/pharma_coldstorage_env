@@ -40,6 +40,8 @@ overflow waste caused by the previous action.
 
 import asyncio
 import json
+import math
+import re
 import os
 import textwrap
 from typing import Any, Dict, List, Optional, Tuple
@@ -69,7 +71,8 @@ SUCCESS_THRESHOLD = 0.80
 # System prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = textwrap.dedent("""
+# Shared by both action formats: who the agent is, the warehouse, and the report fields.
+_PROMPT_INTRO = textwrap.dedent("""
     You are a pharmaceutical warehouse procurement agent managing a cold-chain inventory over a multi-day episode.
 
     OBJECTIVE
@@ -100,7 +103,10 @@ SYSTEM_PROMPT = textwrap.dedent("""
       stockout_penalty             — how critical this SKU is. Higher = protect it first.
       waste_penalty                — cost of this SKU's deliveries overflowing storage.
       cold_storage_required        — true means this SKU uses the cold storage pool.
+""").strip()
 
+# Action format "units": the model writes the number of units to order per SKU.
+_UNITS_RULES = textwrap.dedent("""
     DECISION RULES
     --------------
     1. Decide for EVERY SKU in the report, every day. Each one needs its own quantity.
@@ -123,6 +129,54 @@ SYSTEM_PROMPT = textwrap.dedent("""
     Format:
         {"<sku_name>": <units>, "<sku_name>": <units>}
 """).strip()
+
+# Action format "days": the model chooses how many days of stock it wants per SKU and
+# days_to_units() turns that into units. Small models judge "how much cover" far better
+# than they do the multiply-and-subtract to get units.
+_DAYS_RULES = textwrap.dedent("""
+    YOUR DECISION: DAYS OF STOCK
+    ----------------------------
+    You do not order units directly. For EVERY SKU, choose how many DAYS OF STOCK you want
+    to have after today's order, counting stock on the shelf plus orders already on the way.
+    One day of stock = the SKU's recent daily demand (the larger of avg_demand_last_5_days
+    and avg_demand_per_day). The system turns your choice into an order:
+        units ordered = days x recent daily demand - inventory_on_hand - inbound_units
+    If a SKU already has that many days_of_cover, nothing is ordered for it.
+
+    DECISION RULES
+    --------------
+    1. Choose a number of days for EVERY SKU in the report, every day.
+    2. An order takes about avg_lead_time days to arrive, so choose more days than
+       avg_lead_time. About avg_lead_time + 3 days is a sensible default.
+    3. If lead_time_last3_orders is rising, suppliers are slowing down: choose more days.
+    4. If avg_demand_last_5_days is clearly above avg_demand_per_day, demand is rising:
+       choose more days.
+    5. Each storage pool holds about 21 days of its SKUs' demand (watch cold_ratio and
+       ambient_ratio). Choosing far more days than needed overflows storage, and deliveries
+       that do not fit are wasted; wasted cold-storage (insulin) deliveries cost the most.
+    6. When storage is tight, give more days to SKUs with a higher stockout_penalty.
+    7. Until some demand has been observed (days_of_cover is null), nothing can be ordered,
+       whatever you choose.
+
+    ACTION FORMAT
+    -------------
+    Respond with one JSON object mapping EVERY SKU name to the number of days of stock you
+    want. Use the exact SKU names from the report. The values are days, not units; values
+    above 30 are treated as 30.
+
+    Format:
+        {"<sku_name>": <days>, "<sku_name>": <days>, ...}
+""").strip()
+
+SYSTEM_PROMPT = _PROMPT_INTRO + "\n\n" + _UNITS_RULES
+SYSTEM_PROMPT_DAYS = _PROMPT_INTRO + "\n\n" + _DAYS_RULES
+ACTION_FORMATS = ("units", "days")
+# Upper limit on a "days" answer; above the 21-day storage, so over-ordering can still overflow.
+MAX_DAYS_OF_STOCK = 30.0
+
+
+def system_prompt(action: str = "units") -> str:
+    return SYSTEM_PROMPT_DAYS if action == "days" else SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory STDOUT format)
@@ -298,6 +352,7 @@ def build_user_prompt(
     obs_dict: Dict[str, Any],
     action_history: List[Tuple[int, str, str]],
     step: int,
+    action: str = "units",
 ) -> str:
     """
     Build the user-turn message from:
@@ -313,12 +368,68 @@ def build_user_prompt(
         n_days = min(HISTORY_DAYS, len(action_history))
         parts.append(f"--- RESULTS OF THE LAST {n_days} DAY{'S' if n_days != 1 else ''} ---\n{history_str}")
     parts.append(f"--- TODAY'S INVENTORY REPORT ---\n{format_report(obs_dict)}")
-    parts.append(
-        "--- YOUR PROCUREMENT DECISION ---\n"
-        "Go through every SKU, then respond with a single JSON object on one line:\n"
-        '{"<sku_name>": <units>, ...} for the SKUs that need an order, or {} if none do.'
-    )
+    if action == "days":
+        parts.append(
+            "--- YOUR DECISION ---\n"
+            "For every SKU, choose the days of stock you want (see the rules), then respond with "
+            "a single JSON object on one line:\n"
+            '{"<sku_name>": <days>, ...}'
+        )
+    else:
+        parts.append(
+            "--- YOUR PROCUREMENT DECISION ---\n"
+            "Go through every SKU, then respond with a single JSON object on one line:\n"
+            '{"<sku_name>": <units>, ...} for the SKUs that need an order, or {} if none do.'
+        )
     return "\n\n".join(parts)
+
+
+def parse_json_object(text: str) -> Dict[str, Any]:
+    """The first {...} block in a reply as a dict (also accepts {"orders": {...}}); {} if none."""
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group())
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if isinstance(parsed.get("orders"), dict):
+        parsed = parsed["orders"]
+    return parsed
+
+
+def days_to_units(obs: InventoryState, days_by_sku: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Turn "days of stock wanted" per SKU into units to order, using only what the agent observes:
+        units = days x recent daily demand - inventory_on_hand - inbound_units
+    Recent daily demand is the larger of avg_demand_last_5_days and avg_demand_per_day.
+    Days are clipped to [0, MAX_DAYS_OF_STOCK]; unknown SKUs, non-numbers and SKUs with no
+    demand seen yet are skipped; orders below one unit are dropped.
+    """
+    known = {sku_id.lower(): sku_id for sku_id in obs.skus}
+    inbound = inbound_units_by_sku(obs)
+    orders: Dict[str, float] = {}
+    for name, value in days_by_sku.items():
+        sku_id = known.get(str(name).strip().lower())
+        if sku_id is None or isinstance(value, bool):
+            continue
+        try:
+            days = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(days):
+            continue
+        days = min(max(days, 0.0), MAX_DAYS_OF_STOCK)
+        sku = obs.skus[sku_id]
+        recent_demand = max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
+        if recent_demand <= 0:
+            continue
+        units = days * recent_demand - sku.inventory_on_hand - inbound[sku_id]
+        if units >= 1:
+            orders[sku_id] = float(round(units))
+    return orders
 
 # ---------------------------------------------------------------------------
 # LLM call

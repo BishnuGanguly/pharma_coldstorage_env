@@ -52,6 +52,24 @@ The script checks that Ollama is running and the model exists, then plays the ep
 Results are written to `results/` in the same format as `eval.py`, so you can compare them
 later, e.g. `uv run python eval.py --compare results/llm_pharma-gemma2-2b_test_all_3.jsonl results/baseline_test_all_3.jsonl`.
 
+## What the model answers: days of stock
+
+By default (`--action days`) the model does not calculate units. For each medicine it
+answers with **how many days of stock it wants**, e.g. `{"paracetamol": 8, "insulin": 6}`,
+and the script turns that into an order:
+
+```
+units ordered = days x recent daily demand - on hand - already inbound
+```
+
+One "day of stock" is one day of recent demand: if paracetamol sells about 400 a day,
+8 days means 3,200 units in total, so with 1,000 on hand and 1,200 inbound the order is
+1,000. Days are capped at 30. Small models are bad at that arithmetic but reasonable at
+judging "how much cover"; for example, Gemma 2 2B scored 0.24 when it had to write units.
+
+The printout shows both the model's reply and the units sent. Use `--action units` to
+make the model write units itself.
+
 ## Other models
 
 Pass any Ollama model tag with `--base-model`, both for `--setup` and for runs:
@@ -83,6 +101,7 @@ to `--timeout` seconds (default 600) before it counts as failed.
 | `--tasks` | `flu_season` | Comma-separated task names, or `all` |
 | `--episodes` | `1` | Seeds per task (the first N test seeds) |
 | `--timeout` | `600` | Seconds allowed per model call |
+| `--action` | `days` | `days`: the model answers in days of stock per SKU, converted to units; `units`: the model writes units |
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |
 | `--base-url` | `http://localhost:11434/v1` | Any OpenAI-compatible server |
