@@ -64,8 +64,8 @@ def test_llm_free_text_reply_is_parsed():
     assert trace.rows[0]["orders"] == {"insulin": 30.0, "paracetamol": 500.0}
     prompts = agent.client.chat.completions.prompts
     assert len(prompts) == trace.config.no_of_days
-    # Day 2 onwards the prompt carries the previous day's feedback.
-    assert "RECENT ACTION HISTORY" in prompts[1]
+    # From day 2 the prompt carries the previous day's results.
+    assert "RESULTS OF THE LAST 1 DAY ---" in prompts[1]
 
 
 def test_llm_failures_stop_the_run():

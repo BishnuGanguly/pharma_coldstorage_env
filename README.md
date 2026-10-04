@@ -104,6 +104,8 @@ Each day the agent responds with a JSON object mapping SKU names to order quanti
 
 Only include SKUs you want to order. Send `{}` to place no orders today.
 
+The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the dashboard and `PharmaEnvironment.to_llm_prompt()`) shows the report one SKU per line and adds two values computed from the observation: `inbound_units` (already ordered, not yet arrived) and `days_of_cover` ((on hand + inbound) ÷ recent daily demand). It shows the results of the last 3 days but not the model's own earlier replies, and its instructions contain no example quantities: small models tend to copy either one instead of reading the report.
+
 The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 
 ---

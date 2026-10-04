@@ -21,53 +21,6 @@ from tasks import compute_step_reward, get_task_config
 
 
 # ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """You are a pharmaceutical warehouse procurement agent managing a cold-chain inventory over a multi-day episode.
-
-OBJECTIVE
----------
-Every day you receive an inventory report and decide what to order.
-Maximise prescription fill rate while avoiding stockouts, waste, and capacity overflow.
-
-WAREHOUSE
----------
-Two storage pools:
-  cold_storage  — refrigerated, for cold-chain SKUs only.
-  ambient       — standard storage, for all other SKUs.
-Do not order quantities that would exceed the available capacity of either pool.
-
-SKUS
-----
-Each SKU exposes:
-  inventory_on_hand            — units on shelf right now.
-  stockout_days_if_no_reorder  — days until stockout at current demand rate. Act before this hits 0.
-  avg_demand_per_day           — rolling daily demand average. Use for reorder sizing.
-  avg_demand_last_5_days       — recent daily demand average. Reacts faster to spikes.
-  avg_lead_time                — average days from order to arrival. Use to time orders.
-  lead_time_last3_orders       — recent lead times. Rising values = supply stress.
-  expected_inbound_orders      — your open orders with estimated arrival dates.
-  stockout_penalty             — criticality of this SKU. Higher = order first.
-  waste_penalty                — cost of this SKU's deliveries overflowing storage. Higher = avoid over-ordering it.
-
-DECISION RULES
---------------
-1. Order before stockout_days_if_no_reorder drops below avg_lead_time.
-2. Higher stockout_penalty SKUs take priority when capacity or budget is tight.
-3. expected_inbound_orders may be inaccurate if true lead times deviate from the average.
-4. Deliveries that do not fit in storage are wasted, and the penalty is the share of the
-   delivery lost, weighted by SKU (insulin waste costs the most) — do not over-order.
-
-ACTION FORMAT
--------------
-Respond with a JSON object mapping SKU names to order quantities:
-  {"insulin": 100, "paracetamol": 500}
-To order nothing today respond with: {}
-"""
-
-
-# ---------------------------------------------------------------------------
 # PharmaEnvironment
 # ---------------------------------------------------------------------------
 
@@ -530,43 +483,17 @@ class PharmaEnvironment(Environment):
     # -----------------------------------------------------------------------
 
     def to_llm_prompt(self) -> str:
+        """
+        The prompt an LLM agent sees for today: the system prompt plus today's report,
+        exactly as built by inference.py (the single source of the prompt).
+        """
+        import inference  # imported lazily: only needed when a prompt is requested
+
         if self._inventory_state is None:
-            return _SYSTEM_PROMPT + "\n\nNo state available. Call reset() first."
-        ts = self._inventory_state
-        report = {
-            "day": ts.current_date,
-            "storage": {
-                "cold_total": ts.cold_storage_total_capacity,
-                "cold_used": round(ts.cold_storage_current_capacity, 1),
-                "cold_ratio": round(ts.cold_storage_ratio, 3),
-                "ambient_total": ts.ambient_storage_total_capacity,
-                "ambient_used": round(ts.ambient_storage_current_capacity, 1),
-                "ambient_ratio": round(ts.ambient_storage_ratio, 3),
-            },
-            "expected_inbound_orders": ts.expected_inbound_orders,
-            "inventory": {
-                sku_id: {
-                    "inventory_on_hand": round(sku.inventory_on_hand, 1),
-                    "avg_demand_per_day": round(sku.avg_demand_per_day, 2),
-                    "avg_demand_last_5_days": round(sku.avg_demand_last_5_days, 2),
-                    "avg_lead_time": round(sku.avg_lead_time, 1),
-                    "lead_time_last3_orders": [round(x, 1) for x in sku.lead_time_last3_orders],
-                    "stockout_days_if_no_reorder": round(sku.stockout_days_if_no_reorder, 1),
-                    "cold_storage_required": sku.cold_storage_required,
-                    "stockout_penalty": sku.stockout_penalty,
-                    "waste_penalty": sku.waste_penalty,
-                }
-                for sku_id, sku in ts.skus.items()
-            },
-        }
-        return (
-            _SYSTEM_PROMPT
-            + "\n\n--- TODAY'S INVENTORY REPORT ---\n"
-            + json.dumps(report, indent=2)
-            + "\n\n--- YOUR PROCUREMENT DECISION ---\n"
-            + 'Respond with JSON: {"sku_name": quantity, ...}\n'
-            + "Order nothing today with: {}\n"
-        )
+            return inference.SYSTEM_PROMPT + "\n\nNo state available. Call reset() first."
+        report = inference.observation_to_dict(self._inventory_state)
+        user_prompt = inference.build_user_prompt(report, [], step=self._inventory_state.current_date + 1)
+        return inference.SYSTEM_PROMPT + "\n\n" + user_prompt
 
     # -----------------------------------------------------------------------
     # Default episode config

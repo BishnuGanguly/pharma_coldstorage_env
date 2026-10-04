@@ -24,7 +24,7 @@ uv run python local_llm/run_local_llm.py --setup --episodes 1
 
 This runs `ollama pull qwen2.5:1.5b` and then `ollama create pharma-qwen15 -f local_llm/Modelfile`,
 which makes a copy of the model with an 8,192-token context window. The environment's prompts
-reach about 2,700 tokens by mid-episode, and Ollama may cut longer prompts from the start,
+are about 1,800 tokens, and Ollama may cut prompts longer than its default window from the start,
 which would drop the rules and output format. It then runs one test episode.
 
 ## 4. Run it
