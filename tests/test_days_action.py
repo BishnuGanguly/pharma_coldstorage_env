@@ -110,3 +110,13 @@ def test_eval_logs_model_reply_and_units_sent(monkeypatch):
     assert record["score"] > 0.7  # 9 days of cover every day is a sensible plan
     later = record["steps"][20]
     assert later["reply"].startswith('{"insulin": 9') and later["orders_sent"] != later["reply"]
+
+
+def test_days_prompt_targets_steady_cover_within_storage():
+    """Regression: Gemma 2B answered 30 (the only number in the old format line) and echoed
+    days_of_cover, so stock ran down, then a 30-day jump overflowed storage."""
+    rules = inference.SYSTEM_PROMPT_DAYS[len(inference.SYSTEM_PROMPT_DAYS) - len(inference._DAYS_RULES):]
+    assert "30" not in rules and "ALREADY HAVE" in rules and "between 10 and 14 days" in rules
+    assert inference.MAX_DAYS_OF_STOCK == 21
+    obs, _ = _played(10)
+    assert inference.days_to_units(obs, {"vitamins": 30}) == inference.days_to_units(obs, {"vitamins": 21})

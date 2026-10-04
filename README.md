@@ -112,7 +112,7 @@ The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the d
 units ordered = days x recent daily demand - inventory_on_hand - inbound_units
 ```
 
-Recent daily demand is the larger of `avg_demand_last_5_days` and `avg_demand_per_day`. Days are capped at 30, and orders under one unit are dropped. The model decides *how much cover* it wants; the arithmetic, which small models get wrong, is done in code. With `--action units` the model writes units itself, using `SYSTEM_PROMPT` (the format `inference.py` and the benchmark use). For example, Gemma 2 2B scored 0.24 in units mode, mostly because it copied the report's small numbers as order sizes.
+Recent daily demand is the larger of `avg_demand_last_5_days` and `avg_demand_per_day`. Days are capped at 21 (the storage size), and orders under one unit are dropped. The model decides *how much cover* it wants; the arithmetic, which small models get wrong, is done in code. With `--action units` the model writes units itself, using `SYSTEM_PROMPT` (the format `inference.py` and the benchmark use). For example, Gemma 2 2B scored 0.24 in units mode, mostly because it copied the report's small numbers as order sizes.
 
 The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 

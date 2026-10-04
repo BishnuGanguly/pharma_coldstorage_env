@@ -67,7 +67,7 @@ units ordered = days x recent daily demand - on hand - already inbound
 
 One "day of stock" is one day of recent demand: if paracetamol sells about 400 a day,
 8 days means 3,200 units in total, so with 1,000 on hand and 1,200 inbound the order is
-1,000. Days are capped at 30. Small models are bad at that arithmetic but reasonable at
+1,000. Days are capped at 21, the storage size. Small models are bad at that arithmetic but reasonable at
 judging "how much cover"; for example, Gemma 2 2B scored 0.24 when it had to write units.
 
 The printout shows both the model's reply and the units sent. Use `--action units` to
