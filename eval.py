@@ -38,7 +38,7 @@ import statistics
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -81,8 +81,12 @@ def run_episode(
     split: str = "",
     llm: Optional[Dict[str, str]] = None,
     save_steps: bool = False,
+    on_day: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Play one full episode and return a JSON-serialisable record of it."""
+    """
+    Play one full episode and return a JSON-serialisable record of it.
+    `on_day(day, reply)`, if given, is called after every simulated day (e.g. to show progress).
+    """
     agent = make_agent(agent_name, llm)
     env = PharmaEnvironment()
     obs = env.reset(task_name=task_name, seed=seed)
@@ -111,6 +115,8 @@ def run_episode(
         overflow_days += obs.inventory_excess_today > 0
         units_wasted += obs.inventory_excess_today
         history.append((day, reply, inference.build_feedback(obs)))
+        if on_day is not None:
+            on_day(day, reply)
         if save_steps:
             steps.append({
                 "day": day,
