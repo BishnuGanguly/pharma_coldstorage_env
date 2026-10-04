@@ -16,6 +16,7 @@ Then, with Ollama running:
 
     uv run python local_llm/run_local_llm.py                           # 1 flu_season episode
     uv run python local_llm/run_local_llm.py --tasks all --episodes 3  # 3 seeds of every task
+    uv run python local_llm/run_local_llm.py --seed 10042              # one chosen seed
     uv run python local_llm/run_local_llm.py --base-model qwen2.5:3b   # another model
 
 Each episode is 60 model calls. The script prints progress, a score table, the
@@ -160,6 +161,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible endpoint")
     parser.add_argument("--tasks", default="flu_season", help="comma-separated task names, or 'all'")
     parser.add_argument("--episodes", type=int, default=1, help="seeds per task")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="run exactly this one seed per task instead of the first --episodes seeds of --split "
+                             "(test seeds are 10000-19999, train seeds 0-9999)")
     parser.add_argument("--split", choices=sorted(SEED_SPLITS), default="test")
     parser.add_argument("--show", type=int, default=10, help="how many of the model's replies to print")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
@@ -169,7 +173,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     unknown = [t for t in tasks if t not in TASK_REGISTRY]
     if unknown:
         parser.error(f"unknown task(s) {unknown}; choose from {sorted(TASK_REGISTRY)}")
-    seeds = list(SEED_SPLITS[args.split][:args.episodes])
+    if args.seed is not None:
+        if args.seed < 0:
+            parser.error("--seed must be 0 or more")
+        seeds = [args.seed]
+        # The split only labels the results; pick the one the seed belongs to.
+        args.split = next((name for name, split in SEED_SPLITS.items() if args.seed in split), "custom")
+    else:
+        seeds = list(SEED_SPLITS[args.split][:args.episodes])
 
     model = args.model or model_name(args.base_model)
     if args.setup:
@@ -185,7 +196,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     baseline_records = [E.run_episode("baseline", t, s, split=args.split) for t in tasks for s in seeds]
     oracle_records = [E.run_episode("oracle", t, s, split=args.split) for t in tasks for s in seeds]
 
-    stem = f"{args.split}_{'-'.join(tasks) if args.tasks != 'all' else 'all'}_{len(seeds)}"
+    count = f"seed{args.seed}" if args.seed is not None else str(len(seeds))
+    stem = f"{args.split}_{'-'.join(tasks) if args.tasks != 'all' else 'all'}_{count}"
     safe_model = "".join(c if c.isalnum() or c == "." else "-" for c in model)
     paths = {
         f"llm_{safe_model}": llm_records,
