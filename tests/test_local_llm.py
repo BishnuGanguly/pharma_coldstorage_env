@@ -99,3 +99,14 @@ def test_call_timeout_reaches_the_model_client():
     agent = E.make_agent("llm", {"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "x", "timeout": 600})
     assert agent.client.timeout == 600
     assert E.make_agent("llm", {"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "x"}).client.timeout == 60
+
+
+def test_single_chosen_seed(fake_server, tmp_path, capsys):
+    R.main(["--base-url", fake_server, "--seed", "10042", "--show", "0", "--results-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "1 task(s) x 1 seed(s) = 60 model calls" in out and "flu_season, seed 10042" in out
+    llm = json.loads((tmp_path / "llm_pharma-gemma2-2b_test_flu_season_seed10042.jsonl").read_text())
+    baseline = json.loads((tmp_path / "baseline_test_flu_season_seed10042.jsonl").read_text())
+    assert llm["seed"] == baseline["seed"] == 10042 and llm["split"] == "test"
+    R.main(["--base-url", fake_server, "--seed", "7", "--show", "0", "--results-dir", str(tmp_path)])
+    assert json.loads((tmp_path / "oracle_train_flu_season_seed7.jsonl").read_text())["split"] == "train"

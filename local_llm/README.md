@@ -37,6 +37,9 @@ uv run python local_llm/run_local_llm.py
 
 # 3 seeds of every task (540 calls)
 uv run python local_llm/run_local_llm.py --tasks all --episodes 3
+
+# one chosen seed (60 calls); the same seed always gives the same world
+uv run python local_llm/run_local_llm.py --seed 10042
 ```
 
 The script checks that Ollama is running and the model exists, then plays the episodes
@@ -100,6 +103,7 @@ to `--timeout` seconds (default 600) before it counts as failed.
 | `--base-model` | `gemma2:2b` | Ollama model to use |
 | `--tasks` | `flu_season` | Comma-separated task names, or `all` |
 | `--episodes` | `1` | Seeds per task (the first N test seeds) |
+| `--seed` | none | Run exactly this one seed per task instead (test seeds 10000–19999, train 0–9999) |
 | `--timeout` | `600` | Seconds allowed per model call |
 | `--action` | `days` | `days`: the model answers in days of stock per SKU, converted to units; `units`: the model writes units |
 | `--show` | `10` | How many of the model's replies to print |
