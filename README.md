@@ -104,6 +104,8 @@ Each day the agent responds with a JSON object mapping SKU names to order quanti
 
 Only include SKUs you want to order. Send `{}` to place no orders today.
 
+The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the dashboard and `PharmaEnvironment.to_llm_prompt()`) shows the report one SKU per line and adds two values computed from the observation: `inbound_units` (already ordered, not yet arrived) and `days_of_cover` ((on hand + inbound) ÷ recent daily demand). It shows the results of the last 3 days but not the model's own earlier replies, and its instructions contain no example quantities: small models tend to copy either one instead of reading the report.
+
 The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 
 ---
@@ -211,7 +213,7 @@ uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost
                       --split test --episodes 10 --save-steps
 ```
 
-**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Qwen2.5 1.5B with Ollama, and one runs it against the baseline and oracle on the same seeds.
+**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Gemma 2 2B (or any other Ollama model) with Ollama, and one runs it against the baseline and oracle on the same seeds.
 
 **Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
 
@@ -322,7 +324,7 @@ pharma_coldstorage_env/
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
 ├── agents.py          # Agents: nothing, baseline, oracle, LLM
 ├── eval.py            # Evaluate an agent over many seeds; compare agents
-├── local_llm/         # Run a local model with Ollama (Modelfile + script)
+├── local_llm/         # Run a local model with Ollama (one script)
 ├── client.py          # OpenEnv async HTTP client (PharmaEnvClient)
 ├── smoke_test.py      # Direct environment test (no server required)
 ├── tests/             # pytest unit tests

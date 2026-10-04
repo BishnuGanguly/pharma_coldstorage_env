@@ -86,46 +86,42 @@ SYSTEM_PROMPT = textwrap.dedent("""
     
     SKUS
     ----
-    Each SKU exposes:
+    Each SKU in the report shows:
       inventory_on_hand            — units physically on shelf right now.
-      avg_demand_per_day           — rolling daily demand average. Use for reorder sizing.
-      avg_demand_last_5_days       — recent demand average. Reacts faster to spikes.
+      inbound_units                — units you have already ordered that have not arrived yet.
+      days_of_cover                — (inventory_on_hand + inbound_units) / recent daily demand:
+                                     how many days your stock plus open orders will last.
+                                     null until any demand has been observed.
+      avg_demand_per_day           — daily demand averaged over the whole episode so far.
+      avg_demand_last_5_days       — recent daily demand. Reacts faster to spikes.
       avg_lead_time                — average days from order placement to arrival.
-      lead_time_last3_orders       — actual lead times of last 3 deliveries. Rising = supply stress.
-      expected_inbound_orders      — your open orders: (sku_id, quantity, expected_arrival_day).
-      stockout_days_if_no_reorder  — days until stockout at the current demand rate.
-      stockout_penalty             — criticality of this SKU. Higher = order first.
-      waste_penalty                — cost of this SKU's deliveries overflowing storage. Higher = avoid over-ordering it.
-      cold_storage_required        — True means this SKU uses the cold storage pool.
+      lead_time_last3_orders       — actual lead times of the last 3 deliveries. Rising = supply stress.
+      stockout_days_if_no_reorder  — days until the shelf is empty, ignoring open orders.
+      stockout_penalty             — how critical this SKU is. Higher = protect it first.
+      waste_penalty                — cost of this SKU's deliveries overflowing storage.
+      cold_storage_required        — true means this SKU uses the cold storage pool.
 
     DECISION RULES
     --------------
-    1. Order before stockout_days_if_no_reorder drops below avg_lead_time.
-    2. Higher stockout_penalty SKUs take priority when storage capacity is tight.
-    3. expected_inbound_orders may be inaccurate — true lead times deviate from avg_lead_time.
-    4. Deliveries that do not fit in storage are wasted. The penalty is the share of the
-       delivery lost, weighted by SKU (insulin waste costs the most) — do not over-order.
-    5. Use avg_demand_last_5_days to detect short-term demand spikes.
-
-    PRIORITY ORDER
-    --------------
-    Higher stockout_penalty = higher priority.
-    insulin (100) > bp_medication (60) > hydroxychloroquine (35) > paracetamol (20) > vitamins (5)
+    1. Decide for EVERY SKU in the report, every day. Each one needs its own quantity.
+    2. A SKU needs an order when its days_of_cover is below avg_lead_time plus a safety
+       margin of about 3 days. If days_of_cover is comfortably above that, do not order it.
+    3. Size an order to bring days_of_cover back up to about avg_lead_time + 3 days:
+       roughly avg_demand_last_5_days x (avg_lead_time + 3) - inventory_on_hand - inbound_units.
+    4. If lead_time_last3_orders is rising, suppliers are slowing down: use the larger
+       lead time, and order earlier.
+    5. Deliveries that do not fit in storage are wasted, and wasted cold-storage (insulin)
+       deliveries cost the most. Never order far more than a SKU needs.
+    6. When storage is tight, protect SKUs with a higher stockout_penalty first.
 
     ACTION FORMAT
     -------------
-    Respond with a JSON object mapping SKU names to order quantities. No extra text.
+    Respond with one JSON object mapping SKU names to the number of units to order today.
+    Use the exact SKU names from the report and compute each quantity from the report.
+    Leave out SKUs that do not need an order. If nothing needs ordering, respond with {}.
 
-    To place orders:
-        {"insulin": 100, "paracetamol": 500}
-
-    To order nothing today:
-        {}
-
-    Rules:
-    - Only include SKUs you want to order today.
-    - Quantities must be positive numbers.
-    - Use exact SKU names as shown in the inventory report.
+    Format:
+        {"<sku_name>": <units>, "<sku_name>": <units>}
 """).strip()
 
 # ---------------------------------------------------------------------------
@@ -170,19 +166,36 @@ def log_end(
 # Observation helpers
 # ---------------------------------------------------------------------------
 
+def inbound_units_by_sku(obs: InventoryState) -> Dict[str, float]:
+    """Units ordered but not yet arrived, per SKU (from the agent-visible expected orders)."""
+    inbound = {sku_id: 0.0 for sku_id in obs.skus}
+    for sku_id, qty, _ in obs.expected_inbound_orders:
+        inbound[sku_id] = inbound.get(sku_id, 0.0) + qty
+    return inbound
+
+
+def days_of_cover(on_hand: float, inbound: float, recent_demand: float) -> Optional[float]:
+    """How many days stock plus open orders last at the recent demand rate; None if no demand seen yet."""
+    if recent_demand <= 0:
+        return None
+    return round((on_hand + inbound) / recent_demand, 1)
+
+
 def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
     """
     Convert InventoryState to a clean dict for the LLM prompt.
-    Shows only Layer 2 (insights) and Layer 3 (real state).
-    Layer 1 (hidden) is never included.
+    Shows only what the agent may observe, plus two values computed from it
+    (inbound_units, days_of_cover) so a model does not have to do that
+    arithmetic itself. Hidden ground truth is never included.
     """
+    inbound = inbound_units_by_sku(obs)
     return {
         "day":  obs.current_date,
         "storage": {
-            "cold_total":    obs.cold_storage_total_capacity,
+            "cold_total":    round(obs.cold_storage_total_capacity, 1),
             "cold_used":     round(obs.cold_storage_current_capacity, 1),
             "cold_ratio":    round(obs.cold_storage_ratio, 3),
-            "ambient_total": obs.ambient_storage_total_capacity,
+            "ambient_total": round(obs.ambient_storage_total_capacity, 1),
             "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
             "ambient_ratio": round(obs.ambient_storage_ratio, 3),
         },
@@ -190,6 +203,11 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
         "inventory": {
             sku_id: {
                 "inventory_on_hand":            round(sku.inventory_on_hand, 1),
+                "inbound_units":                round(inbound[sku_id], 1),
+                "days_of_cover":                days_of_cover(
+                    sku.inventory_on_hand, inbound[sku_id],
+                    max(sku.avg_demand_last_5_days, sku.avg_demand_per_day),
+                ),
                 "avg_demand_per_day":           round(sku.avg_demand_per_day, 2),
                 "avg_demand_last_5_days":       round(sku.avg_demand_last_5_days, 2),
                 "avg_lead_time":                round(sku.avg_lead_time, 1),
@@ -202,6 +220,31 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
             for sku_id, sku in obs.skus.items()
         },
     }
+
+
+def format_report(obs_dict: Dict[str, Any]) -> str:
+    """
+    Render the report as valid JSON with one line per section and per SKU, which
+    reads well and uses far fewer tokens than fully indented JSON.
+    """
+    def compact(value: Any) -> str:
+        return json.dumps(value, separators=(", ", ": "))
+
+    lines = ["{"]
+    keys = list(obs_dict)
+    for i, key in enumerate(keys):
+        comma = "," if i < len(keys) - 1 else ""
+        value = obs_dict[key]
+        if isinstance(value, dict) and value and all(isinstance(v, dict) for v in value.values()):
+            lines.append(f'  "{key}": {{')
+            items = list(value.items())
+            for j, (name, entry) in enumerate(items):
+                lines.append(f'    "{name}": {compact(entry)}' + ("," if j < len(items) - 1 else ""))
+            lines.append("  }" + comma)
+        else:
+            lines.append(f'  "{key}": {compact(value)}{comma}')
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def build_feedback(obs: InventoryState) -> str:
@@ -220,37 +263,35 @@ def build_feedback(obs: InventoryState) -> str:
     })
 
 
+HISTORY_DAYS = 3
+
+
 def build_action_history_str(
     action_history: List[Tuple[int, str, str]],
-    max_entries: int = 10,
+    max_entries: int = HISTORY_DAYS,
 ) -> str:
     """
-    Build a compact JSON string of recent action history.
+    Build a compact JSON string of the results of the last few days.
 
-    Each entry is [day, action_taken, environment_feedback].
-    Truncated to the most recent max_entries to keep context window manageable.
-    The agent uses this to:
-      - See what it ordered and when
-      - See what arrived and what was rejected
-      - Detect patterns (e.g. repeated stockouts → should have ordered more)
-      - Avoid re-ordering something that is already in the inbound pipeline
+    action_history holds (day, action_str, feedback_str) tuples. Only the day and
+    its results (fill rates, short SKUs, waste, reward) are shown, never the
+    model's own earlier replies: small models tend to copy those and repeat the
+    same order every day. What is already on order is visible in the report
+    (inbound_units), so the raw replies are not needed.
 
-    Parameters
-    ----------
-    action_history : list of (day, action_str, feedback_str)
-    max_entries    : maximum number of past steps to include
-
-    Returns a formatted string block, or empty string if no history yet.
+    Returns a formatted string block, or an empty string if there is no history yet.
     """
     if not action_history:
         return ""
 
-    recent = action_history[-max_entries:]
-    entries = [
-        {"day": day, "action": action, "feedback": feedback}
-        for day, action, feedback in recent
-    ]
-    return json.dumps(entries, indent=2)
+    entries = []
+    for day, _action, feedback in action_history[-max_entries:]:
+        try:
+            result = json.loads(feedback)
+        except (TypeError, ValueError):
+            result = feedback
+        entries.append({"day": day, "result": result})
+    return json.dumps(entries)
 
 
 def build_user_prompt(
@@ -266,28 +307,18 @@ def build_user_prompt(
     The history gives the agent memory across steps without requiring
     the LLM to maintain its own internal state.
     """
-    state_json   = json.dumps(obs_dict, indent=2)
-    history_str  = build_action_history_str(action_history)
-
-    history_block = ""
+    parts = [f"Day {obs_dict['day']} — Step {step}"]
+    history_str = build_action_history_str(action_history)
     if history_str:
-        history_block = textwrap.dedent(f"""
-            --- RECENT ACTION HISTORY (last {min(10, len(action_history))} days) ---
-            {history_str}
-
-        """).strip() + "\n\n"
-
-    return textwrap.dedent(f"""
-        Day {obs_dict['day']} — Step {step}
-
-        {history_block}--- TODAY'S INVENTORY REPORT ---
-        {state_json}
-
-        --- YOUR PROCUREMENT DECISION ---
-        Respond with a single JSON object on one line.
-        To order: {{"sku_name": quantity, ...}}
-        To skip:  {{}}
-    """).strip()
+        n_days = min(HISTORY_DAYS, len(action_history))
+        parts.append(f"--- RESULTS OF THE LAST {n_days} DAY{'S' if n_days != 1 else ''} ---\n{history_str}")
+    parts.append(f"--- TODAY'S INVENTORY REPORT ---\n{format_report(obs_dict)}")
+    parts.append(
+        "--- YOUR PROCUREMENT DECISION ---\n"
+        "Go through every SKU, then respond with a single JSON object on one line:\n"
+        '{"<sku_name>": <units>, ...} for the SKUs that need an order, or {} if none do.'
+    )
+    return "\n\n".join(parts)
 
 # ---------------------------------------------------------------------------
 # LLM call
