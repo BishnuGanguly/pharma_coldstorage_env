@@ -213,7 +213,7 @@ uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost
                       --split test --episodes 10 --save-steps
 ```
 
-**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Qwen2.5 1.5B with Ollama, and one runs it against the baseline and oracle on the same seeds.
+**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Gemma 2 2B (or any other Ollama model) with Ollama, and one runs it against the baseline and oracle on the same seeds.
 
 **Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
 
@@ -324,7 +324,7 @@ pharma_coldstorage_env/
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
 ├── agents.py          # Agents: nothing, baseline, oracle, LLM
 ├── eval.py            # Evaluate an agent over many seeds; compare agents
-├── local_llm/         # Run a local model with Ollama (Modelfile + script)
+├── local_llm/         # Run a local model with Ollama (one script)
 ├── client.py          # OpenEnv async HTTP client (PharmaEnvClient)
 ├── smoke_test.py      # Direct environment test (no server required)
 ├── tests/             # pytest unit tests

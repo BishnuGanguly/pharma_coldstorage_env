@@ -134,11 +134,12 @@ class OracleAgent(Agent):
 class LLMAgent(Agent):
     """Same prompt and history format as inference.py, one chat call per day."""
 
-    def __init__(self, model: str, api_key: str, base_url: str, client: Any = None) -> None:
+    def __init__(self, model: str, api_key: str, base_url: str, client: Any = None, timeout: float = 60.0) -> None:
+        """timeout: seconds per call. Raise it for large models on a CPU, where one call can take minutes."""
         if client is None:
             from openai import OpenAI
 
-            client = OpenAI(base_url=base_url, api_key=api_key, timeout=60, max_retries=1)
+            client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=1)
         self.client = client
         self.model = model
 

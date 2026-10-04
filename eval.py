@@ -70,7 +70,8 @@ def make_agent(name: str, llm: Optional[Dict[str, str]] = None) -> Agent:
         return OracleAgent()
     if name == "llm":
         llm = llm or {}
-        return LLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"])
+        return LLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],
+                        timeout=float(llm.get("timeout", 60.0)))
     raise ValueError(f"Unknown agent '{name}'. Choose from {AGENTS}.")
 
 
@@ -281,6 +282,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--model", default=inference.MODEL_NAME, help="llm: model name")
     parser.add_argument("--base-url", default=inference.API_BASE_URL, help="llm: OpenAI-compatible endpoint")
     parser.add_argument("--api-key", default=None, help="llm: API key (default: HF_TOKEN / API_KEY env var)")
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="llm: seconds per model call (raise for large local models on a CPU)")
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("CANDIDATE", "REFERENCE"),
                         help="compare two result files seed by seed instead of running")
     parser.add_argument("--oracle", type=Path, help="with --compare: oracle results, to report gap closed")
@@ -303,7 +306,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.agent == "llm":
         # Local servers such as Ollama ignore the key, but the client needs a non-empty one.
         api_key = args.api_key or os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "not-needed"
-        llm = {"model": args.model, "base_url": args.base_url, "api_key": api_key}
+        llm = {"model": args.model, "base_url": args.base_url, "api_key": api_key, "timeout": args.timeout}
     workers = args.workers or (1 if args.agent == "llm" else min(os.cpu_count() or 1, 8))
 
     records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps)

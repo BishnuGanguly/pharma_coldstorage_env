@@ -30,7 +30,7 @@ class FakeOllama(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._send({"object": "list", "data": [
-            {"id": "pharma-qwen15:latest", "object": "model", "created": 0, "owned_by": "library"}]})
+            {"id": "pharma-gemma2-2b:latest", "object": "model", "created": 0, "owned_by": "library"}]})
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -64,9 +64,9 @@ def test_full_run_against_a_local_server(fake_server, tmp_path, capsys):
     assert "Mean score per task" in out and "LLM minus baseline" in out
     assert "Replies without any JSON object: 0/60" in out
     written = sorted(p.name for p in tmp_path.iterdir())
-    assert written == ["baseline_test_flu_season_1.jsonl", "llm_pharma-qwen15_test_flu_season_1.jsonl",
+    assert written == ["baseline_test_flu_season_1.jsonl", "llm_pharma-gemma2-2b_test_flu_season_1.jsonl",
                        "oracle_test_flu_season_1.jsonl"]
-    llm = json.loads((tmp_path / "llm_pharma-qwen15_test_flu_season_1.jsonl").read_text())
+    llm = json.loads((tmp_path / "llm_pharma-gemma2-2b_test_flu_season_1.jsonl").read_text())
     assert llm["days"] == 60 and llm["score"] > 0.5
 
 
@@ -77,4 +77,22 @@ def test_missing_model_gives_setup_instructions(fake_server):
 
 def test_unreachable_server_says_to_start_ollama():
     with pytest.raises(SystemExit, match="ollama serve"):
-        R.check_server("http://127.0.0.1:9/v1", "pharma-qwen15")
+        R.check_server("http://127.0.0.1:9/v1", "pharma-gemma2-2b")
+
+
+def test_default_is_gemma2_2b_with_a_4k_context():
+    assert R.DEFAULT_BASE_MODEL == "gemma2:2b" and R.model_name("gemma2:2b") == "pharma-gemma2-2b"
+    assert R.model_name("qwen2.5:3b") == "pharma-qwen2-5-3b"
+    assert R.modelfile_text("gemma2:2b") == "FROM gemma2:2b\nPARAMETER num_ctx 4096\n"
+
+
+def test_missing_other_model_suggests_its_setup_command(fake_server, capsys):
+    with pytest.raises(SystemExit, match="--setup --base-model qwen2.5:3b"):
+        R.main(["--base-url", fake_server, "--base-model", "qwen2.5:3b"])
+
+
+def test_call_timeout_reaches_the_model_client():
+    import eval as E
+    agent = E.make_agent("llm", {"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "x", "timeout": 600})
+    assert agent.client.timeout == 600
+    assert E.make_agent("llm", {"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "x"}).client.timeout == 60
