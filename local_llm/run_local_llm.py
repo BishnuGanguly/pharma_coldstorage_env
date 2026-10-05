@@ -2,22 +2,18 @@
 Run a local LLM (served by Ollama) on the Pharma environment and compare it with
 the baseline and the oracle on exactly the same seeds.
 
-One-time setup (install Ollama first: https://ollama.com/download):
+Install Ollama first (https://ollama.com/download) and keep it running. Then:
 
-    uv run python local_llm/run_local_llm.py --setup                             # Gemma 2 2B (default)
-    uv run python local_llm/run_local_llm.py --setup --base-model qwen2.5:3b     # any other Ollama model
+    uv run python local_llm/run_local_llm.py                                  # Gemma 2 2B (default), 1 flu_season episode
+    uv run python local_llm/run_local_llm.py --model qwen2.5:3b               # any Ollama model
+    uv run python local_llm/run_local_llm.py --model qwen2.5:3b --seed 10000 --tasks all
+    uv run python local_llm/run_local_llm.py --tasks all --episodes 3         # 3 seeds of every task
 
-That downloads the base model and creates `pharma-<base-model>` (e.g.
-`pharma-gemma2-2b`), a copy with a 4,096-token context window: the prompts are
-about 1,800 tokens, and Ollama may cut longer prompts from the start, losing the
-rules and output format.
-
-Then, with Ollama running:
-
-    uv run python local_llm/run_local_llm.py                           # 1 flu_season episode
-    uv run python local_llm/run_local_llm.py --tasks all --episodes 3  # 3 seeds of every task
-    uv run python local_llm/run_local_llm.py --seed 10042              # one chosen seed
-    uv run python local_llm/run_local_llm.py --base-model qwen2.5:3b   # another model
+The first time a model is used, the script downloads it (`ollama pull`) and
+creates `pharma-<model>` (e.g. `pharma-qwen2-5-3b`), a copy with a 4,096-token
+context window: the prompts are about 1,800 tokens, and Ollama may cut longer
+prompts from the start, losing the rules and output format. `--setup` forces
+that step again.
 
 Each episode is 60 model calls. The script prints progress, a score table, the
 per-seed comparison with the baseline, and the model's first replies. Results
@@ -83,17 +79,25 @@ def setup(base_model: str, model: str) -> None:
     print(f"\nModel `{model}` is ready.\n", flush=True)
 
 
-def check_server(base_url: str, model: str, setup_hint: str = "--setup", api_key: str = "not-needed") -> None:
-    """Fail early, with instructions, if the server is down or the model is missing."""
+def available_models(base_url: str, api_key: str = "not-needed") -> List[str]:
+    """Model names on the server; exits with instructions if the server cannot be reached."""
     from openai import OpenAI
 
     try:
-        available = [m.id for m in OpenAI(base_url=base_url, api_key=api_key, timeout=10, max_retries=0).models.list()]
+        return [m.id for m in OpenAI(base_url=base_url, api_key=api_key, timeout=10, max_retries=0).models.list()]
     except Exception as exc:
         sys.exit(f"Cannot reach a model server at {base_url} ({type(exc).__name__}).\n"
                  "Start Ollama (open the app, or run `ollama serve` in another terminal) and try again.")
-    names = {m for m in available} | {m.split(":")[0] for m in available}
-    if model not in names:
+
+
+def has_model(available: Sequence[str], model: str) -> bool:
+    return model in set(available) | {m.split(":")[0] for m in available}
+
+
+def check_server(base_url: str, model: str, setup_hint: str = "--setup", api_key: str = "not-needed") -> None:
+    """Fail early, with instructions, if the server is down or the model is missing."""
+    available = available_models(base_url, api_key)
+    if not has_model(available, model):
         listed = ", ".join(sorted(available)) or "none"
         sys.exit(f"Model `{model}` is not available on {base_url} (available: {listed}).\n"
                  f"Run: uv run python local_llm/run_local_llm.py {setup_hint}")
@@ -103,7 +107,8 @@ def check_server(base_url: str, model: str, setup_hint: str = "--setup", api_key
 # Running
 # ---------------------------------------------------------------------------
 
-def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[str, str]) -> List[Dict[str, Any]]:
+def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[str, Any],
+            base_model: Optional[str] = None) -> List[Dict[str, Any]]:
     records = []
     total = len(tasks) * len(seeds)
     for i, (task, seed) in enumerate(((t, s) for t in tasks for s in seeds), start=1):
@@ -115,6 +120,9 @@ def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[st
             print(f"{day + 1}" if (day + 1) % 10 == 0 else ".", end="", flush=True)
 
         record = E.run_episode("llm", task, seed, split=split, llm=llm, save_steps=True, on_day=progress)
+        if base_model:
+            record = {"agent": record["agent"], "model": record["model"], "base_model": base_model,
+                      **{k: v for k, v in record.items() if k not in ("agent", "model")}}
         print(f" -> score {record['score']:.3f}, {record['parse_failures']} replies without JSON "
               f"({time.time() - started:.0f}s)", flush=True)
         records.append(record)
@@ -122,14 +130,15 @@ def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[st
 
 
 def print_report(llm_records, baseline_records, oracle_records, show: int) -> None:
-    print("\n=== Mean score per task ===")
+    name = (llm_records[0].get("base_model") or llm_records[0]["model"]) if llm_records else "LLM"
+    print(f"\n=== Mean score per task: {name} ===")
     print(f"{'task':22s} {'LLM':>7s} {'baseline':>9s} {'oracle':>7s}")
     summaries = [E.summarize(r) for r in (llm_records, baseline_records, oracle_records)]
     for task in summaries[0]:
         print(f"{task:22s} " + " ".join(f"{s[task]['mean']:{w}.3f}" for s, w in zip(summaries, (7, 9, 7))))
 
-    print("\n=== LLM minus baseline, seed by seed ===")
-    E.print_comparison(E.paired_comparison(llm_records, baseline_records, oracle_records), ("LLM", "baseline"))
+    print(f"\n=== {name} minus baseline, seed by seed ===")
+    E.print_comparison(E.paired_comparison(llm_records, baseline_records, oracle_records), (name, "baseline"))
 
     replies = sum(r["days"] for r in llm_records)
     failures = sum(r["parse_failures"] for r in llm_records)
@@ -150,11 +159,13 @@ def print_report(llm_records, baseline_records, oracle_records, show: int) -> No
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--setup", action="store_true", help="download and create the model with Ollama first")
-    parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL,
-                        help=f"Ollama model to use (default {DEFAULT_BASE_MODEL}), e.g. qwen2.5:3b")
-    parser.add_argument("--model", default=None,
-                        help="model name on the server, to skip the pharma-<base-model> copy (e.g. a non-Ollama server)")
+    parser.add_argument("--model", "--base-model", dest="base_model", default=DEFAULT_BASE_MODEL,
+                        help=f"Ollama model to run (default {DEFAULT_BASE_MODEL}), e.g. qwen2.5:3b, qwen2.5:1.5b, gemma2:9b; "
+                             "downloaded and set up automatically the first time")
+    parser.add_argument("--setup", action="store_true",
+                        help="download the model and create its pharma-<model> copy again, even if it exists")
+    parser.add_argument("--server-model", default=None,
+                        help="exact model name on the server, to skip the pharma-<model> copy (e.g. a non-Ollama server)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds allowed per model call")
     parser.add_argument("--action", choices=("days", "units"), default="days",
                         help="the model answers in days of stock per SKU (converted to units; default) or in units")
@@ -182,17 +193,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         seeds = list(SEED_SPLITS[args.split][:args.episodes])
 
-    model = args.model or model_name(args.base_model)
-    if args.setup:
-        setup(args.base_model, model)
-    hint = "--setup" + ("" if args.base_model == DEFAULT_BASE_MODEL else f" --base-model {args.base_model}")
-    check_server(args.base_url, model, setup_hint=hint)
+    model = args.server_model or model_name(args.base_model)
+    if args.server_model:
+        check_server(args.base_url, model, setup_hint="--server-model <a name listed above>")
+    else:
+        if args.setup:
+            setup(args.base_model, model)
+        elif not has_model(available_models(args.base_url), model) and shutil.which("ollama"):
+            print(f"First run of {args.base_model}: setting it up as `{model}`.\n", flush=True)
+            setup(args.base_model, model)
+        check_server(args.base_url, model, setup_hint=f"--setup --model {args.base_model}")
     llm = {"model": model, "base_url": args.base_url, "api_key": "not-needed",
            "timeout": args.timeout, "action": args.action}
 
-    print(f"Model {model} at {args.base_url}, answering in {args.action}: {len(tasks)} task(s) x {len(seeds)} seed(s) "
+    shown = model if args.server_model else f"{args.base_model} (as {model})"
+    print(f"Model {shown} at {args.base_url}, answering in {args.action}: {len(tasks)} task(s) x {len(seeds)} seed(s) "
           f"= {len(tasks) * len(seeds) * 60} model calls\n", flush=True)
-    llm_records = run_llm(tasks, seeds, args.split, llm)
+    llm_records = run_llm(tasks, seeds, args.split, llm, base_model=None if args.server_model else args.base_model)
     baseline_records = [E.run_episode("baseline", t, s, split=args.split) for t in tasks for s in seeds]
     oracle_records = [E.run_episode("oracle", t, s, split=args.split) for t in tasks for s in seeds]
 

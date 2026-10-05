@@ -223,7 +223,7 @@ uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost
 
 LLM agents answer in days of stock by default; add `--action units` to have the model write units itself (see the LLM prompt notes above). With `--save-steps`, each step stores the model's own reply (`reply`) and the units actually sent (`orders_sent`).
 
-**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Gemma 2 2B (or any other Ollama model) with Ollama, and one runs it against the baseline and oracle on the same seeds.
+**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command, e.g. `uv run python local_llm/run_local_llm.py --model qwen2.5:3b`, sets up the model with Ollama the first time and runs it against the baseline and oracle on the same seeds.
 
 **Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
 
