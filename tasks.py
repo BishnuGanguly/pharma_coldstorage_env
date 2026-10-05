@@ -5,6 +5,7 @@ from random import Random
 from typing import Callable, Dict, List, Optional
 
 from models import EpisodeConfig, InventoryState, SKUEpisodeConfig
+from news import add_news
 
 
 # ---------------------------------------------------------------------------
@@ -238,15 +239,20 @@ TEST_SEEDS = range(10_000, 20_000)
 SEED_SPLITS = {"train": TRAIN_SEEDS, "test": TEST_SEEDS}
 
 
-def get_task_config(task_name: str, seed: Optional[int] = None) -> EpisodeConfig:
-    """Build the EpisodeConfig for a registered task."""
+def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -> EpisodeConfig:
+    """
+    Build the EpisodeConfig for a registered task.
+
+    news: 0 (none, the original tasks), 1 or 2 announces the task's disruptions
+    ahead of time (see news.py). News never changes the episode's world.
+    """
     try:
         task_fn = TASK_REGISTRY[task_name]
     except KeyError:
         raise ValueError(
             f"Unknown task '{task_name}'. Available tasks: {sorted(TASK_REGISTRY)}"
         ) from None
-    return task_fn(seed)
+    return add_news(task_fn(seed), news, seed)
 
 
 # ---------------------------------------------------------------------------

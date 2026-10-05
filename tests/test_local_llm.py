@@ -37,6 +37,8 @@ class FakeOllama(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         prompt = request["messages"][-1]["content"]
+        if "EXTRA days" in request["messages"][0]["content"]:   # the news adviser (llm_news)
+            return self._reply(request, '{"paracetamol": 4, "insulin": 0}')
         start = prompt.index("{", prompt.index("TODAY'S INVENTORY REPORT"))
         report, _ = json.JSONDecoder().raw_decode(prompt[start:])
         if "DAYS OF STOCK" in request["messages"][0]["content"]:
@@ -47,6 +49,9 @@ class FakeOllama(BaseHTTPRequestHandler):
                 for sku, d in report["inventory"].items()
             }
         text = "Restocking.\n```json\n" + json.dumps({k: v for k, v in orders.items() if v > 0}) + "\n```"
+        self._reply(request, text)
+
+    def _reply(self, request, text):
         self._send({"id": "x", "object": "chat.completion", "created": 0, "model": request["model"],
                     "choices": [{"index": 0, "finish_reason": "stop",
                                  "message": {"role": "assistant", "content": text}}],
@@ -74,6 +79,20 @@ def test_full_run_against_a_local_server(fake_server, tmp_path, capsys):
     llm = json.loads((tmp_path / "llm_pharma-gemma2-2b_test_flu_season_1.jsonl").read_text())
     assert llm["days"] == 60 and llm["score"] > 0.5
     assert llm["model"] == "pharma-gemma2-2b" and llm["base_model"] == "gemma2:2b"
+
+
+def test_hybrid_news_run(fake_server, tmp_path, capsys):
+    R.main(["--base-url", fake_server, "--tasks", "flu_season", "--episodes", "1", "--agent", "llm_news",
+            "--news", "2", "--show", "0", "--results-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "reading level-2 news" in out and "baseline_news" in out
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "baseline_news_news2_test_flu_season_1.jsonl", "baseline_test_flu_season_1.jsonl",
+        "llm_news_pharma-gemma2-2b_news2_test_flu_season_1.jsonl", "oracle_test_flu_season_1.jsonl"]
+    record = json.loads((tmp_path / "llm_news_pharma-gemma2-2b_news2_test_flu_season_1.jsonl").read_text())
+    assert record["news"] == 2 and record["parse_failures"] == 0 and record["llm_errors"] == 0
+    with pytest.raises(SystemExit):
+        R.main(["--base-url", fake_server, "--agent", "llm_news"])   # needs --news
 
 
 def test_missing_model_gives_setup_instructions(fake_server):

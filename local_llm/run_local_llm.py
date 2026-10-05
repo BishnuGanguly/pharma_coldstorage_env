@@ -8,6 +8,8 @@ Install Ollama first (https://ollama.com/download) and keep it running. Then:
     uv run python local_llm/run_local_llm.py --model qwen2.5:3b               # any Ollama model
     uv run python local_llm/run_local_llm.py --model qwen2.5:3b --seed 10000 --tasks all
     uv run python local_llm/run_local_llm.py --tasks all --episodes 3         # 3 seeds of every task
+    uv run python local_llm/run_local_llm.py --model qwen2.5:3b --agent llm_news --news 2 --tasks all
+                                                     # hybrid: the model reads news, the baseline orders
 
 The first time a model is used, the script downloads it (`ollama pull`) and
 creates `pharma-<model>` (e.g. `pharma-qwen2-5-3b`), a copy with a 4,096-token
@@ -108,7 +110,7 @@ def check_server(base_url: str, model: str, setup_hint: str = "--setup", api_key
 # ---------------------------------------------------------------------------
 
 def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[str, Any],
-            base_model: Optional[str] = None) -> List[Dict[str, Any]]:
+            base_model: Optional[str] = None, agent: str = "llm", news: int = 0) -> List[Dict[str, Any]]:
     records = []
     total = len(tasks) * len(seeds)
     for i, (task, seed) in enumerate(((t, s) for t in tasks for s in seeds), start=1):
@@ -119,7 +121,7 @@ def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[st
             # A dot per day, the day number every 10: large models on a CPU are slow.
             print(f"{day + 1}" if (day + 1) % 10 == 0 else ".", end="", flush=True)
 
-        record = E.run_episode("llm", task, seed, split=split, llm=llm, save_steps=True, on_day=progress)
+        record = E.run_episode(agent, task, seed, split=split, llm=llm, save_steps=True, on_day=progress, news=news)
         if base_model:
             record = {"agent": record["agent"], "model": record["model"], "base_model": base_model,
                       **{k: v for k, v in record.items() if k not in ("agent", "model")}}
@@ -129,13 +131,17 @@ def run_llm(tasks: Sequence[str], seeds: Sequence[int], split: str, llm: Dict[st
     return records
 
 
-def print_report(llm_records, baseline_records, oracle_records, show: int) -> None:
+def print_report(llm_records, baseline_records, oracle_records, show: int, news_rule_records=None) -> None:
     name = (llm_records[0].get("base_model") or llm_records[0]["model"]) if llm_records else "LLM"
     print(f"\n=== Mean score per task: {name} ===")
-    print(f"{'task':22s} {'LLM':>7s} {'baseline':>9s} {'oracle':>7s}")
-    summaries = [E.summarize(r) for r in (llm_records, baseline_records, oracle_records)]
-    for task in summaries[0]:
-        print(f"{task:22s} " + " ".join(f"{s[task]['mean']:{w}.3f}" for s, w in zip(summaries, (7, 9, 7))))
+    columns = [("LLM", llm_records), ("baseline", baseline_records)]
+    if news_rule_records:
+        columns.append(("baseline_news", news_rule_records))
+    columns.append(("oracle", oracle_records))
+    print(f"{'task':22s} " + " ".join(f"{title:>{max(len(title), 7)}s}" for title, _ in columns))
+    summaries = [(max(len(title), 7), E.summarize(r)) for title, r in columns]
+    for task in summaries[0][1]:
+        print(f"{task:22s} " + " ".join(f"{s[task]['mean']:{w}.3f}" for w, s in summaries))
 
     print(f"\n=== {name} minus baseline, seed by seed ===")
     E.print_comparison(E.paired_comparison(llm_records, baseline_records, oracle_records), (name, "baseline"))
@@ -170,6 +176,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--action", choices=("days", "units"), default="days",
                         help="the model answers in days of stock per SKU (converted to units; default) or in units")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible endpoint")
+    parser.add_argument("--agent", choices=("llm", "llm_news"), default="llm",
+                        help="llm: the model decides every order; llm_news: the baseline orders and the model "
+                             "only reads the news and adds extra safety days (needs --news 1 or 2)")
+    parser.add_argument("--news", type=int, choices=E.NEWS_LEVELS, default=0,
+                        help="announce disruptions ahead: 0 no news (default), 1 exact template, 2 varied wording")
     parser.add_argument("--tasks", default="flu_season", help="comma-separated task names, or 'all'")
     parser.add_argument("--episodes", type=int, default=1, help="seeds per task")
     parser.add_argument("--seed", type=int, default=None,
@@ -180,6 +191,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     args = parser.parse_args(argv)
 
+    if args.agent == "llm_news" and args.news == 0:
+        parser.error("--agent llm_news reads the news: add --news 1 or --news 2")
     tasks = list(TASK_REGISTRY) if args.tasks == "all" else [t.strip() for t in args.tasks.split(",")]
     unknown = [t for t in tasks if t not in TASK_REGISTRY]
     if unknown:
@@ -207,24 +220,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
            "timeout": args.timeout, "action": args.action}
 
     shown = model if args.server_model else f"{args.base_model} (as {model})"
-    print(f"Model {shown} at {args.base_url}, answering in {args.action}: {len(tasks)} task(s) x {len(seeds)} seed(s) "
-          f"= {len(tasks) * len(seeds) * 60} model calls\n", flush=True)
-    llm_records = run_llm(tasks, seeds, args.split, llm, base_model=None if args.server_model else args.base_model)
-    baseline_records = [E.run_episode("baseline", t, s, split=args.split) for t in tasks for s in seeds]
-    oracle_records = [E.run_episode("oracle", t, s, split=args.split) for t in tasks for s in seeds]
+    if args.agent == "llm_news":
+        print(f"Model {shown} at {args.base_url}, reading level-{args.news} news (called only on days with news): "
+              f"{len(tasks)} task(s) x {len(seeds)} seed(s)\n", flush=True)
+    else:
+        print(f"Model {shown} at {args.base_url}, answering in {args.action}: {len(tasks)} task(s) x {len(seeds)} "
+              f"seed(s) = {len(tasks) * len(seeds) * 60} model calls\n", flush=True)
+    llm_records = run_llm(tasks, seeds, args.split, llm, base_model=None if args.server_model else args.base_model,
+                          agent=args.agent, news=args.news)
+    runs = {name: [E.run_episode(name, t, s, split=args.split, news=args.news) for t in tasks for s in seeds]
+            for name in ("baseline", "oracle") + (("baseline_news",) if args.news else ())}
 
     count = f"seed{args.seed}" if args.seed is not None else str(len(seeds))
+    news = f"_news{args.news}" if args.news else ""
     stem = f"{args.split}_{'-'.join(tasks) if args.tasks != 'all' else 'all'}_{count}"
     safe_model = "".join(c if c.isalnum() or c == "." else "-" for c in model)
-    paths = {
-        f"llm_{safe_model}": llm_records,
-        "baseline": baseline_records,
-        "oracle": oracle_records,
-    }
+    paths = {f"{args.agent}_{safe_model}{news}": llm_records,
+             **{f"{name}{news if name == 'baseline_news' else ''}": r for name, r in runs.items()}}
     for name, records in paths.items():
         E.write_jsonl(args.results_dir / f"{name}_{stem}.jsonl", records)
 
-    print_report(llm_records, baseline_records, oracle_records, args.show)
+    print_report(llm_records, runs["baseline"], runs["oracle"], args.show, runs.get("baseline_news"))
     print(f"\nResults written to {args.results_dir}/ (*_{stem}.jsonl)")
 
 

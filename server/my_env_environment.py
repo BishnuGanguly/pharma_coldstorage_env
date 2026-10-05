@@ -17,6 +17,7 @@ from models import (
     SKUEpisodeConfig,
     SKUState,
 )
+from news import visible_news
 from tasks import compute_step_reward, get_task_config
 
 
@@ -54,6 +55,7 @@ class PharmaEnvironment(Environment):
         episode_id: Optional[str] = None,
         episode_config: Optional[Union[EpisodeConfig, Dict[str, Any]]] = None,
         task_name: Optional[str] = None,
+        news: int = 0,
         **kwargs: Any,
     ) -> InventoryState:
         """
@@ -61,7 +63,8 @@ class PharmaEnvironment(Environment):
 
         The episode is chosen, in order of precedence, from:
           - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
-          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`
+          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed` and the
+                            news level `news` (0 none, 1 exact, 2 varied; see news.py)
           - the built-in default config
         """
         self._rng = Random(seed)
@@ -71,12 +74,13 @@ class PharmaEnvironment(Environment):
         if episode_config is not None:
             self._episode_config = EpisodeConfig.model_validate(episode_config)
         elif task_name is not None:
-            self._episode_config = get_task_config(task_name, seed)
+            self._episode_config = get_task_config(task_name, seed, news=news)
         else:
             self._episode_config = self._default_episode_config()
         self._draw_world_noise()
         self._inventory_state = self._build_initial_state()
         self._update_insights()
+        self._update_news()
         return self._inventory_state
 
     def _draw_world_noise(self) -> None:
@@ -245,6 +249,7 @@ class PharmaEnvironment(Environment):
         ts.current_date += 1
         if ts.current_date >= cfg.no_of_days:
             ts.done = True
+        self._update_news()
 
     # -----------------------------------------------------------------------
     # True demand
@@ -456,6 +461,11 @@ class PharmaEnvironment(Environment):
                 sku.inventory_on_hand / sku.avg_demand_per_day
                 if sku.avg_demand_per_day > 0 else 999.0
             )
+
+    def _update_news(self) -> None:
+        """Show the news published so far whose event is not over yet."""
+        ts = self._inventory_state
+        ts.news = visible_news(self._episode_config, ts.current_date)
 
     # -----------------------------------------------------------------------
     # Storage recompute

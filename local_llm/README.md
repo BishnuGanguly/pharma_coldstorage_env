@@ -100,6 +100,23 @@ On a laptop CPU each call reads a ~1,800-token prompt, so expect anything from s
 seconds (small models) to a minute or more (7B+) per simulated day. Each call may take up
 to `--timeout` seconds (default 600) before it counts as failed.
 
+## News and the hybrid agent
+
+With `--news 1` or `--news 2`, disruptions are announced 5–10 days before they start (see
+"News" in the main README). `--agent llm_news` runs the hybrid: the baseline places the
+orders and the model only reads the news and answers with extra safety days per product.
+The model is called only on days with news (about 30–55 of the 60 days), with a short
+prompt, so a run is much faster than `--agent llm`:
+
+```bash
+uv run python local_llm/run_local_llm.py --model qwen2.5:3b --agent llm_news --news 2 --tasks all --seed 10000
+# -> results/llm_news_pharma-qwen2-5-3b_news2_test_all_seed10000.jsonl
+```
+
+The score table then also shows `baseline_news`, the same hybrid with perfect news reading:
+the target to aim for. Replies on days without news are logged as
+`{}  (no news today: baseline only, model not called)`.
+
 ## Options
 
 | Option | Default | Meaning |
@@ -110,6 +127,8 @@ to `--timeout` seconds (default 600) before it counts as failed.
 | `--episodes` | `1` | Seeds per task (the first N test seeds) |
 | `--seed` | none | Run exactly this one seed per task instead (test seeds 10000–19999, train 0–9999) |
 | `--timeout` | `600` | Seconds allowed per model call |
+| `--agent` | `llm` | `llm`: the model decides every order; `llm_news`: the model reads the news, the baseline orders |
+| `--news` | `0` | Announce disruptions ahead: `0` none, `1` exact template, `2` varied wording |
 | `--action` | `days` | `days`: the model answers in days of stock per SKU, converted to units; `units`: the model writes units |
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |

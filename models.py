@@ -237,6 +237,17 @@ class InventoryState(Observation):
         ),
     )
 
+    # -- News ----------------------------------------------------------------
+
+    news: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Announcements the agent can see today: every news item already published whose "
+            "event has not ended yet, each starting with the day it was published. "
+            "Empty when the episode has no news (news level 0)."
+        ),
+    )
+
     # -- Episode metadata ----------------------------------------------------
 
     done: bool = Field(
@@ -385,6 +396,42 @@ class SKUEpisodeConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# NewsEvent
+# ---------------------------------------------------------------------------
+
+class NewsEvent(BaseModel):
+    """
+    A disruption of the episode, announced to the agent before it starts.
+
+    The structured fields describe the event exactly (they come from the task's own
+    demand and lead-time curves) and stay hidden; the agent only sees `message`,
+    from `announce_day` until `end_day`.
+    """
+
+    kind: str = Field(
+        description="'supplier_delay' (lead times multiplied) or 'demand_surge' (demand multiplied).",
+    )
+    sku_id: str = Field(description="The SKU the event affects.")
+    start_day: int = Field(ge=0, description="First day of the event.")
+    end_day: int = Field(ge=0, description="Last day of the event.")
+    peak_day: int = Field(ge=0, description="Day of the strongest effect (start_day for a supplier delay).")
+    multiplier: float = Field(
+        gt=0.0,
+        description="Peak multiplier of the SKU's lead time (supplier_delay) or demand (demand_surge).",
+    )
+    announce_day: int = Field(ge=0, description="Day the news is published.")
+    message: str = Field(description="The news text the agent reads.")
+
+    @model_validator(mode="after")
+    def validate_days(self) -> NewsEvent:
+        if not self.start_day <= self.peak_day <= self.end_day:
+            raise ValueError("need start_day <= peak_day <= end_day")
+        if self.announce_day > self.end_day:
+            raise ValueError("announce_day must not be after end_day")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # EpisodeConfig  (top-level task definition)
 # ---------------------------------------------------------------------------
 
@@ -418,6 +465,13 @@ class EpisodeConfig(BaseModel):
     initial_inventory: Dict[str, float] = Field(
         default_factory=dict,
         description="Initial inventory levels for each SKU keyed by sku_id."
+    )
+    news: List[NewsEvent] = Field(
+        default_factory=list,
+        description=(
+            "Disruptions announced to the agent ahead of time (see NewsEvent). "
+            "Empty for news level 0, the original environment."
+        ),
     )
 
     @model_validator(mode="after")
