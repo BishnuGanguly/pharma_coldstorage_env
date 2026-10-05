@@ -3,8 +3,8 @@
 Test the environment with a model running on your own computer through
 [Ollama](https://ollama.com): free and without API limits. The default is
 **Gemma 2 2B** (`gemma2:2b`, about 2.6 billion parameters, about a 1.6 GB
-download), which runs on a normal laptop. Any other Ollama model works with
-`--base-model`.
+download), which runs on a normal laptop. Choose any other Ollama model with
+`--model`, e.g. `--model qwen2.5:3b`.
 
 ## 1. Install Ollama
 
@@ -18,22 +18,17 @@ git pull
 uv sync
 ```
 
-## 3. One-time model setup
+## 3. Run it
 
 ```bash
-uv run python local_llm/run_local_llm.py --setup --episodes 1
-```
-
-This runs `ollama pull gemma2:2b`, then `ollama create pharma-gemma2-2b` from a small
-Modelfile that raises the context window to 4,096 tokens: the environment's prompts are
-about 1,800 tokens, and Ollama may cut prompts longer than its default window from the
-start, which would drop the rules and output format. It then runs one test episode.
-
-## 4. Run it
-
-```bash
-# 1 episode of flu_season (60 model calls)
+# 1 episode of flu_season with Gemma 2 2B (60 model calls)
 uv run python local_llm/run_local_llm.py
+
+# choose the model with --model
+uv run python local_llm/run_local_llm.py --model qwen2.5:3b
+
+# one seed of every task with Qwen 2.5 3B (180 calls)
+uv run python local_llm/run_local_llm.py --model qwen2.5:3b --seed 10000 --tasks all
 
 # 3 seeds of every task (540 calls)
 uv run python local_llm/run_local_llm.py --tasks all --episodes 3
@@ -42,11 +37,18 @@ uv run python local_llm/run_local_llm.py --tasks all --episodes 3
 uv run python local_llm/run_local_llm.py --seed 10042
 ```
 
+**The first time you use a model** the script sets it up for you: it runs `ollama pull
+<model>`, then `ollama create pharma-<model>` (e.g. `pharma-qwen2-5-3b`) from a small
+Modelfile that raises the context window to 4,096 tokens. The environment's prompts are
+about 1,800 tokens, and Ollama may cut prompts longer than its default window from the
+start, which would drop the rules and output format. Later runs reuse the copy; `--setup`
+forces the step again.
+
 The script checks that Ollama is running and the model exists, then plays the episodes
 (a dot per simulated day), runs the rule-based **baseline** and the perfect-foresight
 **oracle** on the same seeds, and prints:
 
-- the mean score per task for the LLM, baseline and oracle;
+- the mean score per task for the model (named in the heading), baseline and oracle;
 - **LLM minus baseline, seed by seed** with a 95% confidence interval, and the **gap closed**
   (0% = as good as the baseline, 100% = as good as the oracle; negative = worse than the baseline);
 - how many replies contained no JSON, and how many model calls failed;
@@ -67,7 +69,7 @@ units ordered = days x recent daily demand - on hand - already inbound
 
 One "day of stock" is one day of recent demand: if paracetamol sells about 400 a day,
 8 days means 3,200 units in total, so with 1,000 on hand and 1,200 inbound the order is
-1,000. Days are capped at 30. Small models are bad at that arithmetic but reasonable at
+1,000. Days are capped at 21, the storage size. Small models are bad at that arithmetic but reasonable at
 judging "how much cover"; for example, Gemma 2 2B scored 0.24 when it had to write units.
 
 The printout shows both the model's reply and the units sent. Use `--action units` to
@@ -75,16 +77,18 @@ make the model write units itself.
 
 ## Other models
 
-Pass any Ollama model tag with `--base-model`, both for `--setup` and for runs:
+Pass any Ollama model tag with `--model` (`--base-model` also works). Each result line
+records it as `base_model`, and the result files are named after it, so runs of
+different models never overwrite each other:
 
 ```bash
-uv run python local_llm/run_local_llm.py --setup --base-model qwen2.5:3b
-uv run python local_llm/run_local_llm.py --base-model qwen2.5:3b --tasks all --episodes 3
+uv run python local_llm/run_local_llm.py --model qwen2.5:3b --tasks all --episodes 3
+# -> results/llm_pharma-qwen2-5-3b_test_all_3.jsonl
 ```
 
 Rough guide (approximate download sizes; larger models follow the rules better but are slower):
 
-| `--base-model` | Parameters | Download |
+| `--model` | Parameters | Download |
 |---|---|---|
 | `qwen2.5:1.5b` | 1.5B | ~1 GB |
 | `gemma2:2b` (default) | 2.6B | ~1.6 GB |
@@ -100,7 +104,8 @@ to `--timeout` seconds (default 600) before it counts as failed.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--base-model` | `gemma2:2b` | Ollama model to use |
+| `--model` | `gemma2:2b` | Ollama model to run (also `--base-model`); set up automatically the first time |
+| `--setup` | off | Download the model and recreate its `pharma-<model>` copy even if it exists |
 | `--tasks` | `flu_season` | Comma-separated task names, or `all` |
 | `--episodes` | `1` | Seeds per task (the first N test seeds) |
 | `--seed` | none | Run exactly this one seed per task instead (test seeds 10000–19999, train 0–9999) |
@@ -109,14 +114,14 @@ to `--timeout` seconds (default 600) before it counts as failed.
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |
 | `--base-url` | `http://localhost:11434/v1` | Any OpenAI-compatible server |
-| `--model` | `pharma-<base-model>` | Exact model name on the server, e.g. for a non-Ollama server |
+| `--server-model` | `pharma-<model>` | Exact model name on the server, e.g. for a non-Ollama server |
 
 ## Troubleshooting
 
 | Message | Fix |
 |---|---|
 | `Cannot reach a model server ...` | Start Ollama (open the app or run `ollama serve`) |
-| `Model pharma-... is not available ...` | Run the `--setup` command it prints |
+| `Model pharma-... is not available ...` | The `ollama` command was not found, so it could not be set up automatically: install Ollama, or run the `--setup` command it prints |
 | `The ollama command was not found` | Install Ollama, or add it to your PATH |
 | `The LLM failed its first 3 calls ...` | The server stopped, ran out of memory, or calls are slower than `--timeout`: restart Ollama, use a smaller model, or raise `--timeout` |
 | Very slow | Use a smaller model, fewer `--episodes`, or a free GPU notebook (Colab/Kaggle) |

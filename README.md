@@ -112,7 +112,7 @@ The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the d
 units ordered = days x recent daily demand - inventory_on_hand - inbound_units
 ```
 
-Recent daily demand is the larger of `avg_demand_last_5_days` and `avg_demand_per_day`. Days are capped at 30, and orders under one unit are dropped. The model decides *how much cover* it wants; the arithmetic, which small models get wrong, is done in code. With `--action units` the model writes units itself, using `SYSTEM_PROMPT` (the format `inference.py` and the benchmark use). For example, Gemma 2 2B scored 0.24 in units mode, mostly because it copied the report's small numbers as order sizes.
+Recent daily demand is the larger of `avg_demand_last_5_days` and `avg_demand_per_day`. Days are capped at 21 (the storage size), and orders under one unit are dropped. The model decides *how much cover* it wants; the arithmetic, which small models get wrong, is done in code. With `--action units` the model writes units itself, using `SYSTEM_PROMPT` (the format `inference.py` and the benchmark use). For example, Gemma 2 2B scored 0.24 in units mode, mostly because it copied the report's small numbers as order sizes.
 
 The environment also accepts a raw LLM message string — it extracts the first valid JSON object from the text automatically. SKU names are matched case-insensitively and numeric strings are accepted; unknown SKUs, non-positive or non-numeric quantities are ignored instead of failing the step.
 
@@ -223,7 +223,7 @@ uv run python eval.py --agent llm --model qwen2.5:3b --base-url http://localhost
 
 LLM agents answer in days of stock by default; add `--action units` to have the model write units itself (see the LLM prompt notes above). With `--save-steps`, each step stores the model's own reply (`reply`) and the units actually sent (`orders_sent`).
 
-**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command sets up Gemma 2 2B (or any other Ollama model) with Ollama, and one runs it against the baseline and oracle on the same seeds.
+**Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command, e.g. `uv run python local_llm/run_local_llm.py --model qwen2.5:3b`, sets up the model with Ollama the first time and runs it against the baseline and oracle on the same seeds.
 
 **Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
 

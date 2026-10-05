@@ -141,28 +141,33 @@ _DAYS_RULES = textwrap.dedent("""
     One day of stock = the SKU's recent daily demand (the larger of avg_demand_last_5_days
     and avg_demand_per_day). The system turns your choice into an order:
         units ordered = days x recent daily demand - inventory_on_hand - inbound_units
-    If a SKU already has that many days_of_cover, nothing is ordered for it.
+
+    days_of_cover in the report is what you ALREADY HAVE. Your answer is the TARGET you want.
+    Answering with the current days_of_cover orders nothing; to restock, answer with more.
 
     DECISION RULES
     --------------
     1. Choose a number of days for EVERY SKU in the report, every day.
     2. An order takes about avg_lead_time days to arrive, so choose more days than
-       avg_lead_time. About avg_lead_time + 3 days is a sensible default.
-    3. If lead_time_last3_orders is rising, suppliers are slowing down: choose more days.
-    4. If avg_demand_last_5_days is clearly above avg_demand_per_day, demand is rising:
-       choose more days.
-    5. Each storage pool holds about 21 days of its SKUs' demand (watch cold_ratio and
-       ambient_ratio). Choosing far more days than needed overflows storage, and deliveries
-       that do not fit are wasted; wasted cold-storage (insulin) deliveries cost the most.
-    6. When storage is tight, give more days to SKUs with a higher stockout_penalty.
-    7. Until some demand has been observed (days_of_cover is null), nothing can be ordered,
+       avg_lead_time. About avg_lead_time + 3 days is a sensible default; for most SKUs on
+       most days that is between 10 and 14 days.
+    3. Keep the target steady from day to day. Do not let it run down and then jump up.
+    4. If lead_time_last3_orders is rising, suppliers are slowing down: choose a few more days.
+    5. If avg_demand_last_5_days is clearly above avg_demand_per_day, demand is rising:
+       choose a few more days.
+    6. Each storage pool holds only about 21 days of its SKUs' demand, shared by all SKUs in
+       the pool (watch cold_ratio and ambient_ratio). Large targets overflow storage, and
+       deliveries that do not fit are wasted; wasted cold-storage (insulin) deliveries cost
+       the most. Targets near the 21-day limit for every SKU waste stock.
+    7. When storage is tight, give more days to SKUs with a higher stockout_penalty.
+    8. Until some demand has been observed (days_of_cover is null), nothing can be ordered,
        whatever you choose.
 
     ACTION FORMAT
     -------------
     Respond with one JSON object mapping EVERY SKU name to the number of days of stock you
-    want. Use the exact SKU names from the report. The values are days, not units; values
-    above 30 are treated as 30.
+    want. Use the exact SKU names from the report. The values are days, not units; the
+    largest target accepted is 21 days.
 
     Format:
         {"<sku_name>": <days>, "<sku_name>": <days>, ...}
@@ -171,8 +176,9 @@ _DAYS_RULES = textwrap.dedent("""
 SYSTEM_PROMPT = _PROMPT_INTRO + "\n\n" + _UNITS_RULES
 SYSTEM_PROMPT_DAYS = _PROMPT_INTRO + "\n\n" + _DAYS_RULES
 ACTION_FORMATS = ("units", "days")
-# Upper limit on a "days" answer; above the 21-day storage, so over-ordering can still overflow.
-MAX_DAYS_OF_STOCK = 30.0
+# Upper limit on a "days" answer: the 21-day storage size. A pool is shared, so targets
+# near the limit for every SKU can still overflow it when demand is above its base level.
+MAX_DAYS_OF_STOCK = 21.0
 
 
 def system_prompt(action: str = "units") -> str:

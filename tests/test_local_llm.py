@@ -28,9 +28,11 @@ class FakeOllama(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    models = ["pharma-gemma2-2b:latest"]
+
     def do_GET(self):
         self._send({"object": "list", "data": [
-            {"id": "pharma-gemma2-2b:latest", "object": "model", "created": 0, "owned_by": "library"}]})
+            {"id": m, "object": "model", "created": 0, "owned_by": "library"} for m in self.models]})
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -64,13 +66,14 @@ def test_full_run_against_a_local_server(fake_server, tmp_path, capsys):
     R.main(["--base-url", fake_server, "--tasks", "flu_season", "--episodes", "1",
             "--show", "3", "--results-dir", str(tmp_path)])
     out = capsys.readouterr().out
-    assert "Mean score per task" in out and "LLM minus baseline" in out
+    assert "Mean score per task: gemma2:2b" in out and "gemma2:2b minus baseline" in out
     assert "Replies without any JSON object: 0/60" in out
     written = sorted(p.name for p in tmp_path.iterdir())
     assert written == ["baseline_test_flu_season_1.jsonl", "llm_pharma-gemma2-2b_test_flu_season_1.jsonl",
                        "oracle_test_flu_season_1.jsonl"]
     llm = json.loads((tmp_path / "llm_pharma-gemma2-2b_test_flu_season_1.jsonl").read_text())
     assert llm["days"] == 60 and llm["score"] > 0.5
+    assert llm["model"] == "pharma-gemma2-2b" and llm["base_model"] == "gemma2:2b"
 
 
 def test_missing_model_gives_setup_instructions(fake_server):
@@ -89,9 +92,34 @@ def test_default_is_gemma2_2b_with_a_4k_context():
     assert R.modelfile_text("gemma2:2b") == "FROM gemma2:2b\nPARAMETER num_ctx 4096\n"
 
 
-def test_missing_other_model_suggests_its_setup_command(fake_server, capsys):
-    with pytest.raises(SystemExit, match="--setup --base-model qwen2.5:3b"):
-        R.main(["--base-url", fake_server, "--base-model", "qwen2.5:3b"])
+def test_missing_model_without_ollama_cli_suggests_its_setup_command(fake_server, monkeypatch):
+    monkeypatch.setattr(R.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit, match="--setup --model qwen2.5:3b"):
+        R.main(["--base-url", fake_server, "--model", "qwen2.5:3b"])
+
+
+def test_model_option_sets_up_a_new_model_automatically(fake_server, tmp_path, monkeypatch, capsys):
+    """--model qwen2.5:3b on a server without it: the script runs the one-time setup itself."""
+    calls = []
+
+    def fake_setup(base_model, model):
+        calls.append((base_model, model))
+        FakeOllama.models.append(f"{model}:latest")
+
+    monkeypatch.setattr(R.shutil, "which", lambda name: "/usr/bin/ollama")
+    monkeypatch.setattr(R, "setup", fake_setup)
+    monkeypatch.setattr(FakeOllama, "models", list(FakeOllama.models))
+    R.main(["--base-url", fake_server, "--model", "qwen2.5:3b", "--seed", "10000", "--show", "0",
+            "--results-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert calls == [("qwen2.5:3b", "pharma-qwen2-5-3b")]
+    assert "Model qwen2.5:3b (as pharma-qwen2-5-3b)" in out and "Mean score per task: qwen2.5:3b" in out
+    record = json.loads((tmp_path / "llm_pharma-qwen2-5-3b_test_flu_season_seed10000.jsonl").read_text())
+    assert record["base_model"] == "qwen2.5:3b"
+    # Already set up: the next run does not set it up again; --base-model still works.
+    R.main(["--base-url", fake_server, "--base-model", "qwen2.5:3b", "--seed", "10000", "--show", "0",
+            "--results-dir", str(tmp_path)])
+    assert len(calls) == 1
 
 
 def test_call_timeout_reaches_the_model_client():
