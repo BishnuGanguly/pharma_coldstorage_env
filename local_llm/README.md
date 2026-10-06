@@ -61,9 +61,9 @@ later, e.g. `uv run python eval.py --compare results/llm_pharma-gemma2-2b_test_a
 
 By default (`--action adjust`) a simple rule already orders every medicine up to a
 sensible default: enough for its lead time plus 3 safety days. The model answers, for each
-medicine, **how many days to keep above or below that default**, from -3 to +10, e.g.
-`{"paracetamol": 4, "vitamins": -2, "insulin": 0}`: more paracetamol because demand is
-rising, a little less of vitamins because storage is nearly full.
+medicine, **how many extra days to keep on top of that default**, from 0 to +10, e.g.
+`{"paracetamol": 4, "vitamins": 0, "insulin": 1}`: more paracetamol because demand is
+rising, the default for vitamins, a little extra insulin because deliveries are slowing.
 
 So a model that answers 0, leaves a medicine out, copies a number from the report or
 writes no JSON at all plays like the baseline (about 0.89), not like an empty warehouse.
@@ -145,7 +145,7 @@ the target to aim for. Replies on days without news are logged as
 | `--timeout` | `600` | Seconds allowed per model call |
 | `--agent` | `llm` | `llm`: the model decides every order; `llm_news`: the model reads the news, the baseline orders |
 | `--news` | `0` | Announce disruptions ahead: `0` none, `1` exact template, `2` varied wording |
-| `--action` | `adjust` | `adjust`: days above/below a sensible default per SKU; `days`: days of stock per SKU; `units`: units to order |
+| `--action` | `adjust` | `adjust`: extra days (0 to +10) on top of a sensible default per SKU; `days`: days of stock per SKU; `units`: units to order |
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |
 | `--base-url` | `http://localhost:11434/v1` | Any OpenAI-compatible server |

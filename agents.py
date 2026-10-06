@@ -272,7 +272,7 @@ class LLMAgent(Agent):
     One chat call per day, with the prompt and history format from inference.py.
 
     action="adjust" (default): the baseline rule orders a default (lead time + 3 safety
-    days) and the model answers only with adjustment days per SKU (-3 to +10), so a
+    days) and the model answers only with extra days per SKU (0 to +10), so a
     copied number, a 0 or a missing SKU plays like the baseline instead of emptying the
     shelf. days_of_cover is left out of the report, since small models copied it.
     action="days": the model answers with days of stock wanted per SKU, and

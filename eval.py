@@ -308,7 +308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="llm: seconds per model call (raise for large local models on a CPU)")
     parser.add_argument("--action", choices=inference.ACTION_FORMATS, default="adjust",
-                        help="llm: adjust = days above/below the baseline's default (default); "
+                        help="llm: adjust = extra days on top of the baseline's default (default); "
                              "days = days of stock per SKU; units = units to order")
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("CANDIDATE", "REFERENCE"),
                         help="compare two result files seed by seed instead of running")

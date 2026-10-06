@@ -183,9 +183,9 @@ _ADJUST_RULES = textwrap.dedent("""
     You do not order units. An automatic rule already orders every SKU up to a sensible
     default: stock on hand plus inbound_units covering the SKU's lead time (the larger of
     avg_lead_time and lead_time_last3_orders) plus 3 safety days of recent demand.
-    For EVERY SKU, choose ADJUSTMENT DAYS: how many days of recent demand to keep above
-    (positive) or below (negative) that default. 0 keeps the default, which is already a
-    reasonable plan; adjust only when the report gives you a reason.
+    For EVERY SKU, choose ADJUSTMENT DAYS: how many EXTRA days of recent demand to keep on
+    top of that default. 0 keeps the default, which is already a reasonable plan; add days
+    only when the report gives you a reason.
 
     DECISION RULES
     --------------
@@ -198,12 +198,11 @@ _ADJUST_RULES = textwrap.dedent("""
     5. News: for an announced supplier delay, add about (slowdown factor - 1) x avg_lead_time
        days from the day the news appears until the delay is over; for an announced demand
        surge, add a few days until its peak. Products the news does not mention: no change.
-    6. Storage: each pool holds only about 21 days of its SKUs' demand. If cold_ratio or
-       ambient_ratio is high (above about 0.85), use negative days for that pool's SKUs with
-       the lowest stockout_penalty, so deliveries do not overflow and get wasted; wasted
-       insulin costs the most.
-    7. Adjustments run from -3 to +10 days. Large positive adjustments for many SKUs at once
-       overflow storage.
+    6. Storage: each pool holds only about 21 days of its SKUs' demand, shared by all its
+       SKUs. Large adjustments for many SKUs at once overflow storage, and deliveries that do
+       not fit are wasted; wasted insulin costs the most. If cold_ratio or ambient_ratio is
+       high, add days only where a shortage is likely, favouring a higher stockout_penalty.
+    7. Adjustments run from 0 to +10 days.
 
     ACTION FORMAT
     -------------
@@ -219,7 +218,9 @@ SYSTEM_PROMPT_DAYS = _PROMPT_INTRO + "\n\n" + _DAYS_RULES
 SYSTEM_PROMPT_ADJUST = _PROMPT_INTRO + "\n\n" + _ADJUST_RULES
 ACTION_FORMATS = ("units", "days", "adjust")
 # Range of an "adjust" answer, in days added to the default cover (lead time + 3 days).
-ADJUST_DAYS_RANGE = (-3.0, 10.0)
+# No negative values: keeping less than the default never helped (all -1: 0.873, all -3:
+# 0.717, vs 0.890 for 0, on 20 test seeds per task), it only added stockouts.
+ADJUST_DAYS_RANGE = (0.0, 10.0)
 # Upper limit on a "days" answer: the 21-day storage size. A pool is shared, so targets
 # near the limit for every SKU can still overflow it when demand is above its base level.
 MAX_DAYS_OF_STOCK = 21.0

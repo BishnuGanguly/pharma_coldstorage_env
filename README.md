@@ -110,11 +110,11 @@ The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the d
 
 | Format | The model answers | Worst case |
 |---|---|---|
-| `adjust` (default) | adjustment days per SKU, -3 to +10, added to the baseline's default of lead time + 3 safety days | about the baseline: a copied number, a 0, a missing SKU or a reply without JSON keeps the default |
+| `adjust` (default) | extra days per SKU, 0 to +10, added to the baseline's default of lead time + 3 safety days | about the baseline: a copied number, a 0, a missing SKU or a reply without JSON keeps the default |
 | `days` | the days of stock it wants per SKU | an empty shelf: an answer of 0 orders nothing |
 | `units` | units to order per SKU | anything |
 
-**`adjust`:** the baseline rule does the ordering and the model only decides where to keep more or less than the default, e.g. `{"paracetamol": 4, "vitamins": -2, "insulin": 0}`. The report leaves out `days_of_cover`: Qwen 2.5 3B, answering in `days`, copied it until its stock ran out (scores 0.17-0.44). On 20 test seeds per task, answering 0 for everything scores 0.890 (the baseline), copying `inventory_on_hand` 0.893, +3 for everything 0.902 and -3 for everything 0.717; the oracle reaches 0.943.
+**`adjust`:** the baseline rule does the ordering and the model only decides where to keep extra stock on top of the default, e.g. `{"paracetamol": 4, "vitamins": 0, "insulin": 1}`. The report leaves out `days_of_cover`: Qwen 2.5 3B, answering in `days`, copied it until its stock ran out (scores 0.17-0.44). On 20 test seeds per task, answering 0 for everything scores 0.890 (the baseline), copying `inventory_on_hand` 0.893, +3 for everything 0.902 and +5 for everything 0.906; the oracle reaches 0.943. Negative values are not allowed: keeping less than the default only added stockouts (-1 for everything: 0.873, -3: 0.717).
 
 **`days`:** the model answers with the **days of stock** it wants per SKU, e.g. `{"paracetamol": 8, "insulin": 6}`, and `inference.days_to_units()` turns that into an order using only observed values:
 

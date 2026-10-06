@@ -70,18 +70,25 @@ def test_no_answer_or_zero_plays_like_the_baseline(text):
 
 def test_adjustment_days_are_added_to_the_default_and_clipped():
     obs, history = _played(10)
-    agent, _ = _agent('{"paracetamol": 4, "Vitamins": -2, "hcq": 100, "insulin": "lots"}')
+    agent, _ = _agent('{"paracetamol": 4, "Vitamins": 2, "hcq": 100, "insulin": "lots"}')
     reply, _ = agent.act(obs, history)
-    expected = baseline_policy(obs, extra_days={"paracetamol": 4, "vitamins": -2, "hydroxychloroquine": 10},
-                               min_extra=-3)
+    expected = baseline_policy(obs, extra_days={"paracetamol": 4, "vitamins": 2, "hydroxychloroquine": 10})
     assert json.loads(reply) == expected
-    assert inference.adjust_days(obs, {"paracetamol": -50, "vitamins": 50}) == {"paracetamol": -3, "vitamins": 10}
+    assert inference.adjust_days(obs, {"paracetamol": -50, "vitamins": 50}) == {"paracetamol": 0, "vitamins": 10}
+
+
+def test_negative_answers_keep_the_default():
+    """Keeping less than the default never helped, so negative answers are clipped to 0."""
+    obs, history = _played(10)
+    agent, _ = _agent('{"insulin": -3, "paracetamol": -3, "bp_medication": -3, "vitamins": -3, "hydroxychloroquine": -3}')
+    reply, _ = agent.act(obs, history)
+    assert json.loads(reply) == baseline_policy(obs)
 
 
 def test_more_days_order_more():
     obs, _ = _played(10)
     sku = "paracetamol"
-    totals = [baseline_policy(obs, extra_days={sku: d}, min_extra=-3).get(sku, 0) for d in (-3, 0, 4, 10)]
+    totals = [baseline_policy(obs, extra_days={sku: d}).get(sku, 0) for d in (0, 2, 4, 10)]
     assert totals == sorted(totals) and totals[0] < totals[-1]
 
 
