@@ -103,6 +103,8 @@ _PROMPT_INTRO = textwrap.dedent("""
       stockout_penalty             — how critical this SKU is. Higher = protect it first.
       waste_penalty                — cost of this SKU's deliveries overflowing storage.
       cold_storage_required        — true means this SKU uses the cold storage pool.
+    When there is news, the report also has a "news" list: announced disruptions (supplier
+    delays, demand surges), each starting with the day it was published.
 """).strip()
 
 # Action format "units": the model writes the number of units to order per SKU.
@@ -249,7 +251,7 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
     arithmetic itself. Hidden ground truth is never included.
     """
     inbound = inbound_units_by_sku(obs)
-    return {
+    report: Dict[str, Any] = {
         "day":  obs.current_date,
         "storage": {
             "cold_total":    round(obs.cold_storage_total_capacity, 1),
@@ -280,6 +282,9 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
             for sku_id, sku in obs.skus.items()
         },
     }
+    if obs.news:
+        report["news"] = list(obs.news)
+    return report
 
 
 def format_report(obs_dict: Dict[str, Any]) -> str:
@@ -436,6 +441,87 @@ def days_to_units(obs: InventoryState, days_by_sku: Dict[str, Any]) -> Dict[str,
         if units >= 1:
             orders[sku_id] = float(round(units))
     return orders
+
+# ---------------------------------------------------------------------------
+# News adviser (hybrid agent): the LLM reads the news, the baseline does the maths
+# ---------------------------------------------------------------------------
+
+NEWS_SYSTEM_PROMPT = textwrap.dedent("""
+    You advise the procurement team of a pharmaceutical warehouse about disruptions announced in the news.
+
+    An automatic ordering rule already keeps, for every product, enough stock for its lead time plus
+    3 safety days of recent demand. It only reacts after a problem shows up in deliveries or sales,
+    which is too late. Your job is to read today's news and decide how many EXTRA days of stock to keep
+    for each product, so the warehouse is ready before the disruption hits.
+
+    PRODUCTS (use these exact names in your answer)
+      insulin             - insulin, kept in cold storage
+      paracetamol         - paracetamol, fever and pain relief
+      bp_medication       - amlodipine, blood-pressure medication
+      vitamins            - vitamin supplements
+      hydroxychloroquine  - hydroxychloroquine (HCQ)
+
+    GUIDELINES
+    1. Supplier delay, deliveries about X times slower: extra days = about (X - 1) x avg_lead_time.
+       Keep it from the day the news appears until the delay is over.
+    2. Demand surge, demand rising to about X times normal: extra days = about (avg_lead_time + 3) x (X - 1) / 2
+       from the day the news appears until the peak; 0 after the peak (recent sales already show the
+       higher demand, and stock bought for the peak would overflow storage as demand falls).
+    3. If both happen to one product, add the two.
+    4. Products the news does not affect, and events that are over: 0.
+    5. Storage is limited, so never more than 15 extra days.
+
+    Respond with one JSON object on one line giving extra days for EVERY product, for example:
+    {"insulin": 0, "paracetamol": 0, "bp_medication": 0, "vitamins": 0, "hydroxychloroquine": 0}
+""").strip()
+
+# Names a model may use for a product instead of its sku_id.
+SKU_ALIASES = {
+    "amlodipine": "bp_medication",
+    "hcq": "hydroxychloroquine",
+    "vitamin": "vitamins",
+    "vitamin supplements": "vitamins",
+}
+
+
+def build_news_prompt(obs: InventoryState) -> str:
+    """Today's news and, per product, the numbers the guidelines use."""
+    lines = [f"Today is day {obs.current_date}.", "", "NEWS (each item starts with the day it was published):"]
+    lines += [f"- {item}" for item in obs.news] or ["- none"]
+    lines += ["", "PRODUCTS:"]
+    for sku_id, sku in obs.skus.items():
+        recent = max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
+        lines.append(f"- {sku_id}: " + json.dumps({
+            "avg_lead_time": round(sku.avg_lead_time, 1),
+            "lead_time_last3_orders": sku.lead_time_last3_orders,
+            "avg_demand_per_day": round(sku.avg_demand_per_day, 1),
+            "avg_demand_last_5_days": round(sku.avg_demand_last_5_days, 1),
+            "days_of_cover": days_of_cover(sku.inventory_on_hand, inbound_units_by_sku(obs)[sku_id], recent),
+        }, separators=(", ", ": ")))
+    lines += ["", "Extra days of stock for every product, as one JSON object:"]
+    return "\n".join(lines)
+
+
+def parse_extra_days(obs: InventoryState, reply: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Extra days per SKU from a parsed reply: SKU names (or aliases) in any case, finite
+    numbers only; anything else is ignored. Clipping is left to agents.baseline_policy.
+    """
+    known = {sku_id.lower(): sku_id for sku_id in obs.skus}
+    extra: Dict[str, float] = {}
+    for name, value in reply.items():
+        key = str(name).strip().lower()
+        sku_id = known.get(key) or known.get(SKU_ALIASES.get(key, ""))
+        if sku_id is None or isinstance(value, bool):
+            continue
+        try:
+            days = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(days):
+            extra[sku_id] = days
+    return extra
+
 
 # ---------------------------------------------------------------------------
 # LLM call

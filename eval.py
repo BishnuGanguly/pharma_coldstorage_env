@@ -44,12 +44,15 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import inference  # noqa: E402
-from agents import Agent, BaselineAgent, LLMAgent, NothingAgent, OracleAgent  # noqa: E402
+from agents import (  # noqa: E402
+    Agent, BaselineAgent, LLMAgent, NewsLLMAgent, NewsRuleAgent, NothingAgent, OracleAgent,
+)
 from models import PharmaAction  # noqa: E402
 from server.my_env_environment import PharmaEnvironment  # noqa: E402
+from news import NEWS_LEVELS  # noqa: E402
 from tasks import SEED_SPLITS, TASK_REGISTRY, compute_final_score  # noqa: E402
 
-AGENTS = ("nothing", "baseline", "oracle", "llm")
+AGENTS = ("nothing", "baseline", "oracle", "llm", "baseline_news", "llm_news")
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 # An LLM that fails this many calls in a row from the very first day is
 # misconfigured (bad token, wrong model, server down): stop instead of
@@ -68,6 +71,12 @@ def make_agent(name: str, llm: Optional[Dict[str, str]] = None) -> Agent:
         return BaselineAgent()
     if name == "oracle":
         return OracleAgent()
+    if name == "baseline_news":
+        return NewsRuleAgent()
+    if name == "llm_news":
+        llm = llm or {}
+        return NewsLLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],
+                            timeout=float(llm.get("timeout", 60.0)))
     if name == "llm":
         llm = llm or {}
         return LLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],
@@ -83,14 +92,16 @@ def run_episode(
     llm: Optional[Dict[str, str]] = None,
     save_steps: bool = False,
     on_day: Optional[Callable[[int, str], None]] = None,
+    news: int = 0,
 ) -> Dict[str, Any]:
     """
     Play one full episode and return a JSON-serialisable record of it.
     `on_day(day, reply)`, if given, is called after every simulated day (e.g. to show progress).
+    `news` is the news level (0 none, 1 exact, 2 varied; see news.py).
     """
     agent = make_agent(agent_name, llm)
     env = PharmaEnvironment()
-    obs = env.reset(task_name=task_name, seed=seed)
+    obs = env.reset(task_name=task_name, seed=seed, news=news)
     agent.start_episode(env)
 
     history: List[Tuple[int, str, str]] = []
@@ -101,6 +112,7 @@ def run_episode(
 
     while not obs.done:
         day = obs.current_date
+        obs_news = obs.news
         reply, error = agent.act(obs, history)
         # What the model itself wrote; for the "days" action format `reply` is the
         # converted order, so check and log the model's own text.
@@ -125,6 +137,7 @@ def run_episode(
         if save_steps:
             steps.append({
                 "day": day,
+                "news": list(obs_news),
                 "reply": model_reply,
                 "orders_sent": reply,
                 "error": error,
@@ -136,11 +149,12 @@ def run_episode(
     days = len(history)
     record: Dict[str, Any] = {
         "agent": agent_name,
-        "model": (llm or {}).get("model") if agent_name == "llm" else None,
+        "model": (llm or {}).get("model") if agent_name in ("llm", "llm_news") else None,
         "action_format": getattr(agent, "action", None),
         "task": task_name,
         "seed": seed,
         "split": split,
+        "news": news,
         "score": round(compute_final_score(obs, env._episode_config), 6),
         "avg_fill": round(fill_total / days, 6) if days else 0.0,
         "stockout_sku_days": stockout_sku_days,
@@ -167,11 +181,12 @@ def evaluate(
     workers: int = 1,
     llm: Optional[Dict[str, str]] = None,
     save_steps: bool = False,
+    news: int = 0,
 ) -> List[Dict[str, Any]]:
     """Run `episodes` seeds (the first N of the split) on each task."""
     seeds = list(SEED_SPLITS[split][:episodes])
     jobs = [
-        dict(agent_name=agent_name, task_name=t, seed=s, split=split, llm=llm, save_steps=save_steps)
+        dict(agent_name=agent_name, task_name=t, seed=s, split=split, llm=llm, save_steps=save_steps, news=news)
         for t in task_names for s in seeds
     ]
     if workers <= 1:
@@ -259,7 +274,7 @@ def print_summary(records: Sequence[Dict[str, Any]]) -> None:
     failures = sum(r["parse_failures"] for r in records)
     errors = sum(r["llm_errors"] for r in records)
     replies = sum(r["days"] for r in records)
-    if records and records[0]["agent"] == "llm":
+    if records and records[0]["agent"] in ("llm", "llm_news"):
         print(f"\nreplies without any JSON object: {failures}/{replies} ({failures / max(replies, 1):.1%}); "
               f"failed LLM calls: {errors}")
 
@@ -284,6 +299,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--workers", type=int, default=None,
                         help="parallel processes (default: CPU count for rule agents, 1 for llm)")
     parser.add_argument("--save-steps", action="store_true", help="also store every day's reply and reward")
+    parser.add_argument("--news", type=int, choices=NEWS_LEVELS, default=0,
+                        help="announce disruptions ahead: 0 no news (default), 1 exact template, 2 varied wording")
     parser.add_argument("--out", type=Path, help="output .jsonl path")
     parser.add_argument("--model", default=inference.MODEL_NAME, help="llm: model name")
     parser.add_argument("--base-url", default=inference.API_BASE_URL, help="llm: OpenAI-compatible endpoint")
@@ -311,16 +328,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         parser.error(f"unknown task(s) {unknown}; choose from {sorted(TASK_REGISTRY)}")
 
     llm = None
-    if args.agent == "llm":
+    if args.agent in ("llm", "llm_news"):
         # Local servers such as Ollama ignore the key, but the client needs a non-empty one.
         api_key = args.api_key or os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "not-needed"
         llm = {"model": args.model, "base_url": args.base_url, "api_key": api_key,
                "timeout": args.timeout, "action": args.action}
-    workers = args.workers or (1 if args.agent == "llm" else min(os.cpu_count() or 1, 8))
+    workers = args.workers or (1 if llm else min(os.cpu_count() or 1, 8))
 
-    records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps)
-    name = args.agent if args.agent != "llm" else "llm_" + re.sub(r"[^A-Za-z0-9.]+", "-", args.model)
-    out = args.out or ROOT / "results" / f"{name}_{args.split}_{args.episodes}.jsonl"
+    records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps, args.news)
+    name = args.agent if not llm else args.agent + "_" + re.sub(r"[^A-Za-z0-9.]+", "-", args.model)
+    news = f"_news{args.news}" if args.news else ""
+    out = args.out or ROOT / "results" / f"{name}{news}_{args.split}_{args.episodes}.jsonl"
     write_jsonl(out, records)
     print_summary(records)
     print(f"\n{len(records)} episodes written to {out}")

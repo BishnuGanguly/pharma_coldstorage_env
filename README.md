@@ -208,6 +208,32 @@ Mean final score on the first 50 test seeds per task (`python eval.py --agent <a
 
 The oracle is not 1.0 because episodes start with almost no stock: the first days are lost for every agent until a first delivery can arrive. LLM results are still to be published.
 
+## News: disruptions announced ahead of time
+
+The baseline reaches about 95% of the oracle because the observation holds only clean numbers, and turning numbers into orders is solved arithmetic. With **news**, the agent also reads text announcing each disruption a few days before it starts. That is information the baseline cannot use, and reading it is something a language model can do.
+
+`news.py` reads each task's own demand and lead-time curves, turns every disruption into an event (a supplier delay where lead times rise, a demand surge where demand reaches 1.5× normal or more), and publishes it **5–10 days before it starts** (drawn per event from the seed, never before day 0). The world itself is unchanged: news never alters demand, lead times or noise, and the baseline scores exactly the same with or without it.
+
+| Level | What the agent reads | Example |
+|---|---|---|
+| `0` | No news (the original environment, the default) | — |
+| `1` | One fixed template with exact days and multiplier | *SUPPLIER DELAY - insulin: orders placed from day 15 to day 25 will take about 3.7x the normal lead time.* |
+| `2` | Varied wording; timing relative to publication and approximate (±1–2 days); severity in words or a rounded number; drug names instead of SKU ids | *Logistics warning: because of a strike at the cold-chain carrier, deliveries of insulin will be severely delayed, starting in about 5 days, for about 10 days.* |
+
+The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`. False alarms and irrelevant news are planned for a later level.
+
+**Hybrid agent (`llm_news`).** The baseline does the arithmetic, and the LLM only reads the news and answers with **extra safety days per SKU** (`inference.NEWS_SYSTEM_PROMPT`), e.g. `{"insulin": 6, "paracetamol": 0, ...}`. The extra days are clipped to 0–15 and so that total cover stays within 18 days (storage holds about 21). On days without news the model is not called, so the agent plays exactly like the baseline. A confused model can therefore cost little, and any gain from the news lifts the score *above* the baseline.
+
+**Reference: perfect news reading (`baseline_news`).** This agent reads the exact event behind each published item (not the text) and adds extra days by a fixed rule. Like the oracle, it is a reference: it shows what the news is worth, and it is a natural teacher for fine-tuning. On the first 50 test seeds per task:
+
+| Agent | Supply Chain | Flu Season | Epidemic Two Waves | Gap to oracle closed |
+|---|:---:|:---:|:---:|:---:|
+| Baseline (ignores news) | 0.881 ± 0.005 | 0.905 ± 0.005 | 0.876 ± 0.006 | — |
+| `baseline_news`, news level 1 | 0.911 ± 0.004 | 0.914 ± 0.004 | 0.917 ± 0.003 | 48% |
+| Oracle | 0.942 ± 0.002 | 0.942 ± 0.002 | 0.942 ± 0.002 | 100% |
+
+Level 2 gives the same scores (0.916 on the epidemic), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.027 it recovers from the text alone, especially at level 2.
+
 ## Evaluating an agent
 
 `eval.py` plays an agent over many seeded episodes and reports the mean score per task. It runs the environment in-process (no server needed), and rule-based agents run in parallel.
@@ -225,7 +251,13 @@ LLM agents answer in days of stock by default; add `--action units` to have the 
 
 **Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command, e.g. `uv run python local_llm/run_local_llm.py --model qwen2.5:3b`, sets up the model with Ollama the first time and runs it against the baseline and oracle on the same seeds.
 
-**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against) and `llm` (the same prompt as `inference.py`).
+**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against), `llm` (the same prompt as `inference.py`), and, for news (`--news 1` or `2`), `baseline_news` (perfect news reading, a reference) and `llm_news` (the hybrid: the LLM reads the news, the baseline orders).
+
+```bash
+uv run python eval.py --agent baseline_news --news 2 --split test --episodes 50
+uv run python eval.py --agent llm_news --news 2 --model qwen2.5:3b --base-url http://localhost:11434/v1 \
+                      --split test --episodes 10 --save-steps
+```
 
 **Seeds:** `--split train` uses seeds 0–9,999 and `--split test` uses 10,000–19,999, always the first `--episodes` of them. Tune prompts and train models on train seeds only, and report test seeds.
 
