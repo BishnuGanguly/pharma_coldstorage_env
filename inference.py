@@ -175,16 +175,58 @@ _DAYS_RULES = textwrap.dedent("""
         {"<sku_name>": <days>, "<sku_name>": <days>, ...}
 """).strip()
 
+# Action format "adjust": an automatic rule orders a sensible default for every SKU and
+# the model only answers how many days to keep above or below it.
+_ADJUST_RULES = textwrap.dedent("""
+    YOUR DECISION: ADJUSTMENT DAYS
+    ------------------------------
+    You do not order units. An automatic rule already orders every SKU up to a sensible
+    default: stock on hand plus inbound_units covering the SKU's lead time (the larger of
+    avg_lead_time and lead_time_last3_orders) plus 3 safety days of recent demand.
+    For EVERY SKU, choose ADJUSTMENT DAYS: how many days of recent demand to keep above
+    (positive) or below (negative) that default. 0 keeps the default, which is already a
+    reasonable plan; adjust only when the report gives you a reason.
+
+    DECISION RULES
+    --------------
+    1. Answer for EVERY SKU in the report, every day. A SKU you leave out counts as 0.
+    2. Demand rising: if avg_demand_last_5_days is clearly above avg_demand_per_day, add a
+       few days; the faster it rises, the more days.
+    3. Suppliers slowing: if the latest values in lead_time_last3_orders are clearly above
+       avg_lead_time, add a few days.
+    4. Recent shortages: if a SKU appears in short_skus in the recent results, add a few days.
+    5. News: for an announced supplier delay, add about (slowdown factor - 1) x avg_lead_time
+       days from the day the news appears until the delay is over; for an announced demand
+       surge, add a few days until its peak. Products the news does not mention: no change.
+    6. Storage: each pool holds only about 21 days of its SKUs' demand. If cold_ratio or
+       ambient_ratio is high (above about 0.85), use negative days for that pool's SKUs with
+       the lowest stockout_penalty, so deliveries do not overflow and get wasted; wasted
+       insulin costs the most.
+    7. Adjustments run from -3 to +10 days. Large positive adjustments for many SKUs at once
+       overflow storage.
+
+    ACTION FORMAT
+    -------------
+    Respond with one JSON object mapping EVERY SKU name to its adjustment days. Use the exact
+    SKU names from the report. The values are days, not units.
+
+    Format:
+        {"<sku_name>": <adjustment_days>, "<sku_name>": <adjustment_days>, ...}
+""").strip()
+
 SYSTEM_PROMPT = _PROMPT_INTRO + "\n\n" + _UNITS_RULES
 SYSTEM_PROMPT_DAYS = _PROMPT_INTRO + "\n\n" + _DAYS_RULES
-ACTION_FORMATS = ("units", "days")
+SYSTEM_PROMPT_ADJUST = _PROMPT_INTRO + "\n\n" + _ADJUST_RULES
+ACTION_FORMATS = ("units", "days", "adjust")
+# Range of an "adjust" answer, in days added to the default cover (lead time + 3 days).
+ADJUST_DAYS_RANGE = (-3.0, 10.0)
 # Upper limit on a "days" answer: the 21-day storage size. A pool is shared, so targets
 # near the limit for every SKU can still overflow it when demand is above its base level.
 MAX_DAYS_OF_STOCK = 21.0
 
 
 def system_prompt(action: str = "units") -> str:
-    return SYSTEM_PROMPT_DAYS if action == "days" else SYSTEM_PROMPT
+    return {"days": SYSTEM_PROMPT_DAYS, "adjust": SYSTEM_PROMPT_ADJUST}.get(action, SYSTEM_PROMPT)
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory STDOUT format)
@@ -243,12 +285,15 @@ def days_of_cover(on_hand: float, inbound: float, recent_demand: float) -> Optio
     return round((on_hand + inbound) / recent_demand, 1)
 
 
-def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
+def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict[str, Any]:
     """
     Convert InventoryState to a clean dict for the LLM prompt.
     Shows only what the agent may observe, plus two values computed from it
     (inbound_units, days_of_cover) so a model does not have to do that
     arithmetic itself. Hidden ground truth is never included.
+
+    include_cover=False leaves days_of_cover out: in the "adjust" format small models
+    copied it as their answer (Qwen 2.5 3B did so until its stock ran out).
     """
     inbound = inbound_units_by_sku(obs)
     report: Dict[str, Any] = {
@@ -282,6 +327,9 @@ def observation_to_dict(obs: InventoryState) -> Dict[str, Any]:
             for sku_id, sku in obs.skus.items()
         },
     }
+    if not include_cover:
+        for sku in report["inventory"].values():
+            del sku["days_of_cover"]
     if obs.news:
         report["news"] = list(obs.news)
     return report
@@ -379,7 +427,14 @@ def build_user_prompt(
         n_days = min(HISTORY_DAYS, len(action_history))
         parts.append(f"--- RESULTS OF THE LAST {n_days} DAY{'S' if n_days != 1 else ''} ---\n{history_str}")
     parts.append(f"--- TODAY'S INVENTORY REPORT ---\n{format_report(obs_dict)}")
-    if action == "days":
+    if action == "adjust":
+        parts.append(
+            "--- YOUR DECISION ---\n"
+            "For every SKU, choose its adjustment days (see the rules; 0 keeps the default), then "
+            "respond with a single JSON object on one line:\n"
+            '{"<sku_name>": <adjustment_days>, ...}'
+        )
+    elif action == "days":
         parts.append(
             "--- YOUR DECISION ---\n"
             "For every SKU, choose the days of stock you want (see the rules), then respond with "
@@ -523,6 +578,12 @@ def parse_extra_days(obs: InventoryState, reply: Dict[str, Any]) -> Dict[str, fl
         if math.isfinite(days):
             extra[sku_id] = days
     return extra
+
+
+def adjust_days(obs: InventoryState, reply: Dict[str, Any]) -> Dict[str, float]:
+    """Adjustment days per SKU from a parsed "adjust" reply, clipped to ADJUST_DAYS_RANGE."""
+    low, high = ADJUST_DAYS_RANGE
+    return {sku_id: min(max(days, low), high) for sku_id, days in parse_extra_days(obs, reply).items()}
 
 
 # ---------------------------------------------------------------------------

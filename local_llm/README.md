@@ -57,11 +57,24 @@ The script checks that Ollama is running and the model exists, then plays the ep
 Results are written to `results/` in the same format as `eval.py`, so you can compare them
 later, e.g. `uv run python eval.py --compare results/llm_pharma-gemma2-2b_test_all_3.jsonl results/baseline_test_all_3.jsonl`.
 
-## What the model answers: days of stock
+## What the model answers: adjustment days
 
-By default (`--action days`) the model does not calculate units. For each medicine it
-answers with **how many days of stock it wants**, e.g. `{"paracetamol": 8, "insulin": 6}`,
-and the script turns that into an order:
+By default (`--action adjust`) a simple rule already orders every medicine up to a
+sensible default: enough for its lead time plus 3 safety days. The model answers, for each
+medicine, **how many days to keep above or below that default**, from -3 to +10, e.g.
+`{"paracetamol": 4, "vitamins": -2, "insulin": 0}`: more paracetamol because demand is
+rising, a little less of vitamins because storage is nearly full.
+
+So a model that answers 0, leaves a medicine out, copies a number from the report or
+writes no JSON at all plays like the baseline (about 0.89), not like an empty warehouse.
+Its score comes from the adjustments it gets right; the oracle reaches about 0.94.
+(Before this, Qwen 2.5 3B in `days` mode copied `days_of_cover` from the report until its
+stock ran out and scored 0.17-0.44, so `days_of_cover` is no longer shown in this mode.)
+
+### Other formats
+
+With `--action days` the model answers with **how many days of stock it wants**, e.g.
+`{"paracetamol": 8, "insulin": 6}`, and the script turns that into an order:
 
 ```
 units ordered = days x recent daily demand - on hand - already inbound
@@ -72,8 +85,8 @@ One "day of stock" is one day of recent demand: if paracetamol sells about 400 a
 1,000. Days are capped at 21, the storage size. Small models are bad at that arithmetic but reasonable at
 judging "how much cover"; for example, Gemma 2 2B scored 0.24 when it had to write units.
 
-The printout shows both the model's reply and the units sent. Use `--action units` to
-make the model write units itself.
+The printout shows both the model's reply and the units sent. With `--action units` the
+model writes units itself.
 
 ## Other models
 
@@ -93,6 +106,9 @@ Rough guide (approximate download sizes; larger models follow the rules better b
 | `qwen2.5:1.5b` | 1.5B | ~1 GB |
 | `gemma2:2b` (default) | 2.6B | ~1.6 GB |
 | `qwen2.5:3b` | 3B | ~1.9 GB |
+| `llama3.2:3b` | 3B | ~2 GB |
+| `phi4-mini` | 3.8B | ~2.5 GB |
+| `gemma3:4b` | 4B | ~3.3 GB |
 | `qwen2.5:7b` | 7B | ~4.7 GB |
 | `gemma2:9b` | 9B | ~5.4 GB |
 
@@ -129,7 +145,7 @@ the target to aim for. Replies on days without news are logged as
 | `--timeout` | `600` | Seconds allowed per model call |
 | `--agent` | `llm` | `llm`: the model decides every order; `llm_news`: the model reads the news, the baseline orders |
 | `--news` | `0` | Announce disruptions ahead: `0` none, `1` exact template, `2` varied wording |
-| `--action` | `days` | `days`: the model answers in days of stock per SKU, converted to units; `units`: the model writes units |
+| `--action` | `adjust` | `adjust`: days above/below a sensible default per SKU; `days`: days of stock per SKU; `units`: units to order |
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |
 | `--base-url` | `http://localhost:11434/v1` | Any OpenAI-compatible server |

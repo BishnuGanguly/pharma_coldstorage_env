@@ -173,8 +173,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--server-model", default=None,
                         help="exact model name on the server, to skip the pharma-<model> copy (e.g. a non-Ollama server)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds allowed per model call")
-    parser.add_argument("--action", choices=("days", "units"), default="days",
-                        help="the model answers in days of stock per SKU (converted to units; default) or in units")
+    parser.add_argument("--action", choices=E.inference.ACTION_FORMATS, default="adjust",
+                        help="adjust (default): the model answers days above/below a sensible default per SKU; "
+                             "days: days of stock per SKU; units: units to order")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible endpoint")
     parser.add_argument("--agent", choices=("llm", "llm_news"), default="llm",
                         help="llm: the model decides every order; llm_news: the baseline orders and the model "
