@@ -41,7 +41,9 @@ class FakeOllama(BaseHTTPRequestHandler):
             return self._reply(request, '{"paracetamol": 4, "insulin": 0}')
         start = prompt.index("{", prompt.index("TODAY'S INVENTORY REPORT"))
         report, _ = json.JSONDecoder().raw_decode(prompt[start:])
-        if "DAYS OF STOCK" in request["messages"][0]["content"]:
+        if "ADJUSTMENT DAYS" in request["messages"][0]["content"]:
+            orders = {sku: 2 for sku in report["inventory"]}
+        elif "DAYS OF STOCK" in request["messages"][0]["content"]:
             orders = {sku: round(d["avg_lead_time"] + 3, 1) for sku, d in report["inventory"].items()}
         else:
             orders = {

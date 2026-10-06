@@ -65,6 +65,7 @@ def baseline_policy(
     obs: InventoryState,
     safety_days: float = 3.0,
     extra_days: Optional[Dict[str, float]] = None,
+    min_extra: float = 0.0,
 ) -> Dict[str, float]:
     """
     Order-up-to policy that uses only what the agent can observe: keep enough
@@ -72,7 +73,8 @@ def baseline_policy(
     safety days of recent demand.
 
     extra_days adds safety days per SKU (e.g. chosen from the news), clipped to
-    [0, MAX_EXTRA_DAYS] and so that the total cover stays within MAX_COVER_DAYS.
+    [min_extra, MAX_EXTRA_DAYS] and so that the total cover stays within MAX_COVER_DAYS.
+    min_extra below 0 lets an agent keep less than the default (never below the lead time).
     """
     extra_days = extra_days or {}
     inbound: Dict[str, float] = {}
@@ -85,7 +87,7 @@ def baseline_policy(
         if demand <= 0:
             continue
         lead_time = baseline_lead_time(sku)
-        extra = min(max(float(extra_days.get(sku_id, 0.0)), 0.0), MAX_EXTRA_DAYS,
+        extra = min(max(float(extra_days.get(sku_id, 0.0)), min_extra, -safety_days), MAX_EXTRA_DAYS,
                     max(MAX_COVER_DAYS - lead_time - safety_days, 0.0))
         shortfall = demand * (lead_time + safety_days + extra) - sku.inventory_on_hand - inbound.get(sku_id, 0.0)
         if shortfall > 0:
@@ -269,9 +271,12 @@ class LLMAgent(Agent):
     """
     One chat call per day, with the prompt and history format from inference.py.
 
-    action="days" (default): the model answers with days of stock wanted per SKU, and
-    inference.days_to_units() converts that into units before the order is sent. Small
-    models judge "how much cover" far better than they do the arithmetic for units.
+    action="adjust" (default): the baseline rule orders a default (lead time + 3 safety
+    days) and the model answers only with extra days per SKU (0 to +10), so a
+    copied number, a 0 or a missing SKU plays like the baseline instead of emptying the
+    shelf. days_of_cover is left out of the report, since small models copied it.
+    action="days": the model answers with days of stock wanted per SKU, and
+    inference.days_to_units() converts that into units before the order is sent.
     action="units": the model writes units directly (the benchmark's native format).
 
     `last_model_reply` keeps the model's own text for logging; act() returns the order
@@ -285,7 +290,7 @@ class LLMAgent(Agent):
         base_url: str,
         client: Any = None,
         timeout: float = 60.0,
-        action: str = "days",
+        action: str = "adjust",
     ) -> None:
         """timeout: seconds per call. Raise it for large models on a CPU, where one call can take minutes."""
         if action not in inference.ACTION_FORMATS:
@@ -300,7 +305,7 @@ class LLMAgent(Agent):
         self.last_model_reply = ""
 
     def act(self, obs: InventoryState, history: History) -> Tuple[str, Optional[str]]:
-        obs_dict = inference.observation_to_dict(obs)
+        obs_dict = inference.observation_to_dict(obs, include_cover=self.action != "adjust")
         user_prompt = inference.build_user_prompt(obs_dict, history, step=obs.current_date + 1, action=self.action)
         self.last_model_reply = ""
         try:
@@ -315,8 +320,13 @@ class LLMAgent(Agent):
             )
             text = (completion.choices[0].message.content or "").strip()
         except Exception as exc:
-            return "{}", f"{type(exc).__name__}: {exc}"
+            # In "adjust" mode a failed call still orders the default; otherwise nothing.
+            fallback = json.dumps(baseline_policy(obs)) if self.action == "adjust" else "{}"
+            return fallback, f"{type(exc).__name__}: {exc}"
         self.last_model_reply = text
+        if self.action == "adjust":
+            extra = inference.adjust_days(obs, inference.parse_json_object(text))
+            return json.dumps(baseline_policy(obs, extra_days=extra, min_extra=inference.ADJUST_DAYS_RANGE[0])), None
         if self.action == "days":
             return json.dumps(inference.days_to_units(obs, inference.parse_json_object(text))), None
         return text or "{}", None

@@ -80,7 +80,7 @@ def make_agent(name: str, llm: Optional[Dict[str, str]] = None) -> Agent:
     if name == "llm":
         llm = llm or {}
         return LLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],
-                        timeout=float(llm.get("timeout", 60.0)), action=llm.get("action", "days"))
+                        timeout=float(llm.get("timeout", 60.0)), action=llm.get("action", "adjust"))
     raise ValueError(f"Unknown agent '{name}'. Choose from {AGENTS}.")
 
 
@@ -114,7 +114,7 @@ def run_episode(
         day = obs.current_date
         obs_news = obs.news
         reply, error = agent.act(obs, history)
-        # What the model itself wrote; for the "days" action format `reply` is the
+        # What the model itself wrote; for the "adjust" and "days" formats `reply` is the
         # converted order, so check and log the model's own text.
         model_reply = getattr(agent, "last_model_reply", None)
         model_reply = reply if model_reply is None else model_reply
@@ -307,8 +307,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--api-key", default=None, help="llm: API key (default: HF_TOKEN / API_KEY env var)")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="llm: seconds per model call (raise for large local models on a CPU)")
-    parser.add_argument("--action", choices=inference.ACTION_FORMATS, default="days",
-                        help="llm: answer in days of stock per SKU (converted to units) or in units")
+    parser.add_argument("--action", choices=inference.ACTION_FORMATS, default="adjust",
+                        help="llm: adjust = extra days on top of the baseline's default (default); "
+                             "days = days of stock per SKU; units = units to order")
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("CANDIDATE", "REFERENCE"),
                         help="compare two result files seed by seed instead of running")
     parser.add_argument("--oracle", type=Path, help="with --compare: oracle results, to report gap closed")

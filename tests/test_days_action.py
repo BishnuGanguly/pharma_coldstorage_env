@@ -90,8 +90,7 @@ def test_days_prompt_asks_for_days_without_example_quantities():
 def test_llm_agent_in_days_mode_sends_converted_units():
     obs, history = _played(10)
     client, create = _stub_client('Plan:\n{"paracetamol": 15, "insulin": 0}')
-    agent = LLMAgent(model="stub", api_key="x", base_url="x", client=client)
-    assert agent.action == "days"
+    agent = LLMAgent(model="stub", api_key="x", base_url="x", client=client, action="days")
     reply, error = agent.act(obs, history)
     assert error is None and create.system == inference.SYSTEM_PROMPT_DAYS
     assert agent.last_model_reply == 'Plan:\n{"paracetamol": 15, "insulin": 0}'
@@ -104,7 +103,8 @@ def test_eval_logs_model_reply_and_units_sent(monkeypatch):
     client, _ = _stub_client('{"insulin": 9, "paracetamol": 9, "bp_medication": 9, '
                              '"vitamins": 9, "hydroxychloroquine": 9}')
     monkeypatch.setattr(E, "make_agent",
-                        lambda name, llm=None: LLMAgent(model="stub", api_key="x", base_url="x", client=client))
+                        lambda name, llm=None: LLMAgent(model="stub", api_key="x", base_url="x", client=client,
+                                                       action="days"))
     record = E.run_episode("llm", "flu_season", TEST_SEEDS[0], save_steps=True)
     assert record["action_format"] == "days" and record["parse_failures"] == 0
     assert record["score"] > 0.7  # 9 days of cover every day is a sensible plan
