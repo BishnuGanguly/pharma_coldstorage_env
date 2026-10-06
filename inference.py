@@ -471,8 +471,10 @@ NEWS_SYSTEM_PROMPT = textwrap.dedent("""
     4. Products the news does not affect, and events that are over: 0.
     5. Storage is limited, so never more than 15 extra days.
 
-    Respond with one JSON object on one line giving extra days for EVERY product, for example:
-    {"insulin": 0, "paracetamol": 0, "bp_medication": 0, "vitamins": 0, "hydroxychloroquine": 0}
+    Work out each product's extra days from today's news and that product's numbers in the report.
+    Respond with one JSON object on one line giving extra days for EVERY product, using the exact
+    product names above:
+    {"<product_name>": <extra_days>, "<product_name>": <extra_days>, ...}
 """).strip()
 
 # Names a model may use for a product instead of its sku_id.

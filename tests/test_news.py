@@ -184,3 +184,19 @@ def test_command_line_news_flag(tmp_path):
     E.main(["--agent", "baseline_news", "--news", "2", "--episodes", "1", "--tasks", "flu_season",
             "--workers", "1", "--out", str(out)])
     assert json.loads(out.read_text())["news"] == 2
+
+
+def test_news_prompt_has_no_example_answer():
+    """Regression: the prompt ended with an all-zero example answer. A model that copies it
+    plays exactly like the baseline every day, so every sampled answer gets the same
+    reward and GRPO has nothing to learn from."""
+    from test_prompt import SKU_WITH_NUMBER
+
+    assert not SKU_WITH_NUMBER.search(inference.NEWS_SYSTEM_PROMPT)
+    assert '{"<product_name>": <extra_days>' in inference.NEWS_SYSTEM_PROMPT
+    env = PharmaEnvironment()
+    obs = env.reset(task_name="flu_season", seed=TEST_SEEDS[0], news=2)
+    while not obs.news:
+        obs = env.step(PharmaAction(message="{}"))
+    prompt = inference.build_news_prompt(obs)
+    assert not SKU_WITH_NUMBER.search(prompt[prompt.index("Extra days"):])
