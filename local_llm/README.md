@@ -66,8 +66,8 @@ medicine, **how many extra days to keep on top of that default**, from 0 to +10,
 rising, the default for vitamins, a little extra insulin because deliveries are slowing.
 
 So a model that answers 0, leaves a medicine out, copies a number from the report or
-writes no JSON at all plays like the baseline (about 0.89), not like an empty warehouse.
-Its score comes from the adjustments it gets right; the oracle reaches about 0.94.
+writes no JSON at all plays like the baseline (about 0.87), not like an empty warehouse.
+Its score comes from the adjustments it gets right; the oracle reaches about 0.93.
 (Before this, Qwen 2.5 3B in `days` mode copied `days_of_cover` from the report until its
 stock ran out and scored 0.17-0.44, so `days_of_cover` is no longer shown in this mode.)
 
