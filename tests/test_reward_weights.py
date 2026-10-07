@@ -51,3 +51,17 @@ def test_episode_score_is_the_mean_of_weighted_step_rewards():
         rewards.append(obs.reward)
     assert compute_final_score(obs, env._episode_config) == pytest.approx(
         min(1.0, max(0.0, sum(rewards) / env._episode_config.no_of_days)))
+
+
+def test_every_prompt_says_shortages_are_weighted_by_stockout_penalty():
+    import inference
+
+    from test_prompt import SKU_WITH_NUMBER
+
+    for prompt in (inference.SYSTEM_PROMPT, inference.SYSTEM_PROMPT_DAYS, inference.SYSTEM_PROMPT_ADJUST):
+        assert "Shortages are weighted by stockout_penalty in your score" in prompt
+        assert not SKU_WITH_NUMBER.search(prompt)
+    assert "weighted by stockout_penalty" in inference.NEWS_SYSTEM_PROMPT
+    env = PharmaEnvironment()
+    obs = env.reset(task_name="flu_season", seed=TEST_SEEDS[0], news=1)
+    assert '"stockout_penalty": 100.0' in inference.build_news_prompt(obs)

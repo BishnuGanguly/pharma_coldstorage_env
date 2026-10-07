@@ -80,6 +80,8 @@ _PROMPT_INTRO = textwrap.dedent("""
     ---------
     Every day you receive an inventory report and decide what to order.
     Maximise prescription fill rate while avoiding stockouts, waste, and capacity overflow.
+    Shortages are weighted by stockout_penalty in your score: a day out of stock of a SKU with
+    stockout_penalty 100 costs 20 times more than the same day for a SKU with 5.
 
     WAREHOUSE
     ---------
@@ -101,7 +103,8 @@ _PROMPT_INTRO = textwrap.dedent("""
       avg_lead_time                — average days from order placement to arrival.
       lead_time_last3_orders       — actual lead times of the last 3 deliveries. Rising = supply stress.
       stockout_days_if_no_reorder  — days until the shelf is empty, ignoring open orders.
-      stockout_penalty             — how critical this SKU is. Higher = protect it first.
+      stockout_penalty             — how critical this SKU is, and its weight in your score.
+                                     Higher = protect it first.
       waste_penalty                — cost of this SKU's deliveries overflowing storage.
       cold_storage_required        — true means this SKU uses the cold storage pool.
     When there is news, the report also has a "news" list: announced disruptions (supplier
@@ -121,7 +124,8 @@ _UNITS_RULES = textwrap.dedent("""
        lead time, and order earlier.
     5. Deliveries that do not fit in storage are wasted, and wasted cold-storage (insulin)
        deliveries cost the most. Never order far more than a SKU needs.
-    6. When storage is tight, protect SKUs with a higher stockout_penalty first.
+    6. Keep a bigger safety margin for SKUs with a high stockout_penalty; when storage is
+       tight, protect them first.
 
     ACTION FORMAT
     -------------
@@ -162,7 +166,7 @@ _DAYS_RULES = textwrap.dedent("""
        the pool (watch cold_ratio and ambient_ratio). Large targets overflow storage, and
        deliveries that do not fit are wasted; wasted cold-storage (insulin) deliveries cost
        the most. Targets near the 21-day limit for every SKU waste stock.
-    7. When storage is tight, give more days to SKUs with a higher stockout_penalty.
+    7. Give more days to SKUs with a high stockout_penalty, especially when storage is tight.
     8. Until some demand has been observed (days_of_cover is null), nothing can be ordered,
        whatever you choose.
 
@@ -196,14 +200,16 @@ _ADJUST_RULES = textwrap.dedent("""
     3. Suppliers slowing: if the latest values in lead_time_last3_orders are clearly above
        avg_lead_time, add a few days.
     4. Recent shortages: if a SKU appears in short_skus in the recent results, add a few days.
-    5. News: for an announced supplier delay, add about (slowdown factor - 1) x avg_lead_time
+    5. Critical SKUs: a shortage of a SKU with a high stockout_penalty costs the most, so
+       when one of the reasons above applies to it, lean towards more days.
+    6. News: for an announced supplier delay, add about (slowdown factor - 1) x avg_lead_time
        days from the day the news appears until the delay is over; for an announced demand
        surge, add a few days until its peak. Products the news does not mention: no change.
-    6. Storage: each pool holds only about 21 days of its SKUs' demand, shared by all its
+    7. Storage: each pool holds only about 21 days of its SKUs' demand, shared by all its
        SKUs. Large adjustments for many SKUs at once overflow storage, and deliveries that do
        not fit are wasted; wasted insulin costs the most. If cold_ratio or ambient_ratio is
        high, add days only where a shortage is likely, favouring a higher stockout_penalty.
-    7. Adjustments run from 0 to +10 days.
+    8. Adjustments run from 0 to +10 days.
 
     ACTION FORMAT
     -------------
@@ -526,7 +532,9 @@ NEWS_SYSTEM_PROMPT = textwrap.dedent("""
        higher demand, and stock bought for the peak would overflow storage as demand falls).
     3. If both happen to one product, add the two.
     4. Products the news does not affect, and events that are over: 0.
-    5. Storage is limited, so never more than 15 extra days.
+    5. Shortages are weighted by stockout_penalty in the score: for a product with a high
+       stockout_penalty, lean towards the upper end of these estimates.
+    6. Storage is limited, so never more than 15 extra days.
 
     Work out each product's extra days from today's news and that product's numbers in the report.
     Respond with one JSON object on one line giving extra days for EVERY product, using the exact
@@ -556,6 +564,7 @@ def build_news_prompt(obs: InventoryState) -> str:
             "avg_demand_per_day": round(sku.avg_demand_per_day, 1),
             "avg_demand_last_5_days": round(sku.avg_demand_last_5_days, 1),
             "days_of_cover": days_of_cover(sku.inventory_on_hand, inbound_units_by_sku(obs)[sku_id], recent),
+            "stockout_penalty": sku.stockout_penalty,
         }, separators=(", ", ": ")))
     lines += ["", "Extra days of stock for every product, as one JSON object:"]
     return "\n".join(lines)
