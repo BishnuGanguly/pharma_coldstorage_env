@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from math import exp
 from random import Random
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from models import EpisodeConfig, InventoryState, SKUEpisodeConfig
 from news import add_news
@@ -259,18 +259,36 @@ def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -
 # Reward function
 # ---------------------------------------------------------------------------
 
+def weighted_fill(skus: Dict[str, Any], attribute: str = "demand_fulfilled_today") -> float:
+    """
+    Mean of a fill value over SKUs, weighted by each SKU's stockout_penalty:
+
+        Σ stockout_penalty_i × fill_i / Σ stockout_penalty_i
+
+    so running out of insulin (penalty 100) costs 20x more than running out of
+    vitamins (penalty 5). Falls back to the plain mean if no SKU has a penalty.
+    """
+    if not skus:
+        return 0.0
+    weights = {k: max(float(s.stockout_penalty), 0.0) for k, s in skus.items()}
+    total = sum(weights.values())
+    if total <= 0:
+        return sum(getattr(s, attribute) for s in skus.values()) / len(skus)
+    return sum(weights[k] * getattr(s, attribute) for k, s in skus.items()) / total
+
+
 def compute_step_reward(inventory_state: InventoryState) -> float:
     """
-    step_reward = mean(demand_fulfilled_today over SKUs) - waste_fraction_today
+    step_reward = weighted_fill(demand_fulfilled_today) - waste_fraction_today
 
-    waste_fraction_today is the waste_penalty-weighted share of today's
-    deliveries rejected for lack of storage, in [0, 1]. Range is [-1, 1].
+    The fill rate is averaged over SKUs with stockout_penalty as the weight, just as
+    waste_fraction_today is the waste_penalty-weighted share of today's deliveries
+    rejected for lack of storage, in [0, 1]. Range is [-1, 1].
     """
     ts = inventory_state
     if not ts.skus:
         return 0.0
-    demand_fulfilled = sum(s.demand_fulfilled_today for s in ts.skus.values()) / len(ts.skus)
-    return demand_fulfilled - ts.waste_fraction_today
+    return weighted_fill(ts.skus) - ts.waste_fraction_today
 
 
 def average_step_reward(inventory_state: InventoryState, days: int) -> float:
@@ -278,14 +296,15 @@ def average_step_reward(inventory_state: InventoryState, days: int) -> float:
     Sum of the step rewards earned so far divided by `days`, clipped to [0, 1].
 
     Rebuilt from the environment's running totals, no extra state needed:
-      sum of mean fill over days  = mean over SKUs of demand_fulfilled_cumulative
+      sum of weighted fill over days = weighted mean over SKUs of demand_fulfilled_cumulative
+                                       (the weights are fixed for the episode)
       sum of waste_fraction_today = days played - inventory_excess_cumulative
                                     (that total adds 1 - waste_fraction_today each day)
     """
     ts = inventory_state
     if days <= 0 or not ts.skus:
         return 0.0
-    fulfilled = sum(s.demand_fulfilled_cumulative for s in ts.skus.values()) / len(ts.skus)
+    fulfilled = weighted_fill(ts.skus, "demand_fulfilled_cumulative")
     wasted = ts.current_date - ts.inventory_excess_cumulative
     return min(1.0, max(0.0, (fulfilled - wasted) / days))
 
@@ -296,7 +315,7 @@ def compute_final_score(
 ) -> float:
     """
     final_score = clip(sum of step rewards / no_of_days, 0, 1)
-                = clip(mean over days of (mean fill - waste_fraction_today), 0, 1)
+                = clip(mean over days of (weighted fill - waste_fraction_today), 0, 1)
 
     The episode score is the average daily reward, so an agent is evaluated on
     exactly what it is rewarded for each step. Ordering nothing scores ~0.

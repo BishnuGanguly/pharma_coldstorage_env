@@ -24,7 +24,8 @@ STDOUT format (mandatory)
 Score formula (see tasks.compute_final_score)
 ---------------------------------------------
     final_score = clip(sum_days(step_reward) / no_of_days, 0, 1)
-    step_reward = mean_sku(demand_fulfilled_today) - waste_fraction_today
+    step_reward = weighted_sku(demand_fulfilled_today) - waste_fraction_today
+                  (fill rates averaged with stockout_penalty as the weight)
 
     waste_fraction_today is the waste_penalty-weighted share of the day's
     deliveries rejected because storage was full.
@@ -218,8 +219,8 @@ SYSTEM_PROMPT_DAYS = _PROMPT_INTRO + "\n\n" + _DAYS_RULES
 SYSTEM_PROMPT_ADJUST = _PROMPT_INTRO + "\n\n" + _ADJUST_RULES
 ACTION_FORMATS = ("units", "days", "adjust")
 # Range of an "adjust" answer, in days added to the default cover (lead time + 3 days).
-# No negative values: keeping less than the default never helped (all -1: 0.873, all -3:
-# 0.717, vs 0.890 for 0, on 20 test seeds per task), it only added stockouts.
+# No negative values: keeping less than the default never helped (all -1: 0.853, all -3:
+# 0.728, vs 0.869 for 0, on 20 test seeds per task), it only added stockouts.
 ADJUST_DAYS_RANGE = (0.0, 10.0)
 # Upper limit on a "days" answer: the 21-day storage size. A pool is shared, so targets
 # near the limit for every SKU can still overflow it when demand is above its base level.

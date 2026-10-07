@@ -114,7 +114,7 @@ The LLM prompt (`inference.py`, also used by `agents.LLMAgent`, `eval.py`, the d
 | `days` | the days of stock it wants per SKU | an empty shelf: an answer of 0 orders nothing |
 | `units` | units to order per SKU | anything |
 
-**`adjust`:** the baseline rule does the ordering and the model only decides where to keep extra stock on top of the default, e.g. `{"paracetamol": 4, "vitamins": 0, "insulin": 1}`. The report leaves out `days_of_cover`: Qwen 2.5 3B, answering in `days`, copied it until its stock ran out (scores 0.17-0.44). On 20 test seeds per task, answering 0 for everything scores 0.890 (the baseline), copying `inventory_on_hand` 0.893, +3 for everything 0.902 and +5 for everything 0.906; the oracle reaches 0.943. Negative values are not allowed: keeping less than the default only added stockouts (-1 for everything: 0.873, -3: 0.717).
+**`adjust`:** the baseline rule does the ordering and the model only decides where to keep extra stock on top of the default, e.g. `{"paracetamol": 4, "vitamins": 0, "insulin": 1}`. The report leaves out `days_of_cover`: Qwen 2.5 3B, answering in `days`, copied it until its stock ran out (scores 0.17-0.44). On 20 test seeds per task, answering 0 for everything scores 0.869 (the baseline), +3 for everything 0.886, +5 for everything 0.893 and +10 for everything (e.g. a copied large number, clipped) 0.882; the oracle reaches 0.932. Negative values are not allowed: keeping less than the default only added stockouts (-1 for everything: 0.853, -3: 0.728).
 
 **`days`:** the model answers with the **days of stock** it wants per SKU, e.g. `{"paracetamol": 8, "insulin": 6}`, and `inference.days_to_units()` turns that into an order using only observed values:
 
@@ -179,11 +179,13 @@ The trough between waves (days 27–40) is a trap: demand is low but the agent m
 At each step the reward is:
 
 ```
-step_reward = mean(demand_fulfilled_today across all SKUs)
-            - waste_fraction_today
+step_reward = weighted_fill_today − waste_fraction_today
+
+weighted_fill_today = Σ stockout_penalty_i × demand_fulfilled_today_i / Σ stockout_penalty_i
 ```
 
 - `demand_fulfilled_today` per SKU is the fraction of true demand served (0.0 = full stockout, 1.0 = fully served).
+- The fill rates are averaged with each SKU's `stockout_penalty` as the weight, so a shortage costs in proportion to how critical the medicine is. With the built-in catalogue (insulin 100, BP medication 60, HCQ 35, paracetamol 20, vitamins 5; total 220), a full day without insulin costs 100/220 = 0.45 of the day's reward, and a full day without vitamins 5/220 = 0.02. This matches the prompt's instruction to protect high-`stockout_penalty` SKUs first. (Before, all SKUs counted equally: an insulin stockout cost the same as a vitamins one.)
 - `waste_fraction_today` is the share of the day's deliveries rejected because their storage pool was full. It is computed per SKU that received a delivery, then averaged using each SKU's `waste_penalty` as the weight:
 
   ```
@@ -196,7 +198,7 @@ step_reward = mean(demand_fulfilled_today across all SKUs)
 
 ```
 final_score = clip( sum of step rewards / no_of_days , 0, 1 )
-            = clip( mean over days of (mean fill today − waste_fraction_today) , 0, 1 )
+            = clip( mean over days of (weighted fill today − waste_fraction_today) , 0, 1 )
 ```
 
 - The episode score is simply the **average daily step reward**, so an agent is evaluated on exactly what it is rewarded for each day (useful when training with RL).
@@ -212,15 +214,15 @@ Mean final score on the first 50 test seeds per task (`python eval.py --agent <a
 
 | Agent | Supply Chain | Flu Season | Epidemic Two Waves |
 |---|:---:|:---:|:---:|
-| Order nothing (floor) | 0.002 | 0.002 | 0.002 |
-| Baseline (order-up-to rule) | 0.881 ± 0.005 | 0.905 ± 0.005 | 0.876 ± 0.006 |
-| Oracle (perfect foresight, ceiling) | 0.942 ± 0.002 | 0.942 ± 0.002 | 0.942 ± 0.002 |
+| Order nothing (floor) | 0.003 | 0.003 | 0.003 |
+| Baseline (order-up-to rule) | 0.846 ± 0.008 | 0.900 ± 0.004 | 0.856 ± 0.009 |
+| Oracle (perfect foresight, ceiling) | 0.931 ± 0.002 | 0.931 ± 0.002 | 0.932 ± 0.002 |
 
 The oracle is not 1.0 because episodes start with almost no stock: the first days are lost for every agent until a first delivery can arrive. LLM results are still to be published.
 
 ## News: disruptions announced ahead of time
 
-The baseline reaches about 95% of the oracle because the observation holds only clean numbers, and turning numbers into orders is solved arithmetic. With **news**, the agent also reads text announcing each disruption a few days before it starts. That is information the baseline cannot use, and reading it is something a language model can do.
+The baseline reaches about 93% of the oracle because the observation holds only clean numbers, and turning numbers into orders is solved arithmetic. With **news**, the agent also reads text announcing each disruption a few days before it starts. That is information the baseline cannot use, and reading it is something a language model can do.
 
 `news.py` reads each task's own demand and lead-time curves, turns every disruption into an event (a supplier delay where lead times rise, a demand surge where demand reaches 1.5× normal or more), and publishes it **5–10 days before it starts** (drawn per event from the seed, never before day 0). The world itself is unchanged: news never alters demand, lead times or noise, and the baseline scores exactly the same with or without it.
 
@@ -238,11 +240,11 @@ The observation's `news` list holds every item already published whose event has
 
 | Agent | Supply Chain | Flu Season | Epidemic Two Waves | Gap to oracle closed |
 |---|:---:|:---:|:---:|:---:|
-| Baseline (ignores news) | 0.881 ± 0.005 | 0.905 ± 0.005 | 0.876 ± 0.006 | — |
-| `baseline_news`, news level 1 | 0.911 ± 0.004 | 0.914 ± 0.004 | 0.917 ± 0.003 | 48% |
-| Oracle | 0.942 ± 0.002 | 0.942 ± 0.002 | 0.942 ± 0.002 | 100% |
+| Baseline (ignores news) | 0.846 ± 0.008 | 0.900 ± 0.004 | 0.856 ± 0.009 | — |
+| `baseline_news`, news level 1 | 0.898 ± 0.005 | 0.904 ± 0.004 | 0.907 ± 0.004 | 56% |
+| Oracle | 0.931 ± 0.002 | 0.931 ± 0.002 | 0.932 ± 0.002 | 100% |
 
-Level 2 gives the same scores (0.916 on the epidemic), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.027 it recovers from the text alone, especially at level 2.
+Level 2 gives nearly the same scores (0.903 overall, 55% of the gap), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.036 it recovers from the text alone, especially at level 2.
 
 ## Evaluating an agent
 
