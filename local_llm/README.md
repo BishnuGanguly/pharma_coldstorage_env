@@ -54,6 +54,13 @@ The script checks that Ollama is running and the model exists, then plays the ep
 - how many replies contained no JSON, and how many model calls failed;
 - the model's first replies, so you can see what it does.
 
+To see what the model did without pasting the whole results file, print a short summary:
+each episode's score and only the days it asked for extra days or had news to read.
+
+```bash
+uv run python local_llm/summarize_run.py results/llm_pharma-phi4-mini_news2_test_all_3.jsonl
+```
+
 Results are written to `results/` in the same format as `eval.py`, so you can compare them
 later, e.g. `uv run python eval.py --compare results/llm_pharma-gemma2-2b_test_all_3.jsonl results/baseline_test_all_3.jsonl`.
 

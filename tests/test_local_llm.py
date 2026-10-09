@@ -159,3 +159,18 @@ def test_single_chosen_seed(fake_server, tmp_path, capsys):
     assert llm["seed"] == baseline["seed"] == 10042 and llm["split"] == "test"
     R.main(["--base-url", fake_server, "--seed", "7", "--show", "0", "--results-dir", str(tmp_path)])
     assert json.loads((tmp_path / "oracle_train_flu_season_seed7.jsonl").read_text())["split"] == "train"
+
+
+def test_summarize_run_prints_scores_and_news_days(fake_server, tmp_path, capsys):
+    import summarize_run as S
+
+    R.main(["--base-url", fake_server, "--seed", "10000", "--news", "2", "--show", "0",
+            "--results-dir", str(tmp_path)])
+    capsys.readouterr()
+    S.main([str(tmp_path / "llm_pharma-gemma2-2b_news2_test_flu_season_seed10000.jsonl")])
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("flu_season 10000 score ")
+    assert any(" news " in line for line in out[1:])            # days with news are listed
+    assert all(line.startswith("  day ") for line in out[1:])
+    with pytest.raises(SystemExit, match="No such file"):
+        S.main([str(tmp_path / "missing.jsonl")])
