@@ -170,19 +170,30 @@ The trough between waves (days 27–40) is a trap: demand is low but the agent m
 
 ![Epidemic Two Wave — HCQ Demand](plots/task3_epidemic.png)
 
-### Disruption timing: fixed or random
+### Scenarios: fixed or random
 
-By default the disruptions above happen on the same days in every seed; only their size changes. With **random timing** (`timing="random"` in `env.reset` / `get_task_config`, `--random-timing` in `eval.py` and `local_llm/run_local_llm.py`) the days are drawn per seed:
+By default (`scenario="fixed"`) every seed disrupts the same SKUs on the same days; only the size of each disruption changes. The **random scenario** (`scenario="random"` in `env.reset` / `get_task_config`, `--random-scenarios` in `eval.py` and `local_llm/run_local_llm.py`) draws per seed which SKUs are disrupted and when, and gives each storage pool **14 days** of demand instead of 21:
 
-| Task | Fixed days | Random timing |
+| Task | Fixed | Random scenario |
 |---|---|---|
-| Supply Chain Broken | insulin delay 15–25; paracetamol delay 30–40 | insulin delay starts on day 10–20 and lasts 9–13 days; paracetamol delay starts 3–10 days after it ends and lasts 9–13 days |
-| Flu Season | demand peak day 30 (2× extra, width 10); delay 30–40 | peak on day 24–38 at 1.5–2.5× extra, width 8–12 (never 1.5× normal before day 8); delay starts within 3 days of the peak and lasts 11 days |
-| Epidemic Two Waves | waves peak on days 17 and 45; HCQ delay 17–27; insulin delay 20–30 | wave 1 peaks on day 13–23, wave 2 26–32 days later (by day 52; closer waves would merge into one); the delays keep their place relative to wave 1, ±2 days |
+| Supply Chain Broken | insulin delay days 15–25; paracetamol delay 30–40 | two different SKUs drawn from all five; the first delay starts on day 10–20 and lasts 9–13 days, the second starts 3–10 days after it ends and lasts 9–13 days |
+| Flu Season | paracetamol: demand peak day 30 (2× extra, width 10), delay days 30–40 | one SKU drawn from all five: peak on day 24–38 at 1.5–2.5× extra, width 8–12 (never 1.5× normal before day 8); its delay starts within 3 days of the peak and lasts 11 days |
+| Epidemic Two Waves | HCQ waves peak on days 17 and 45; HCQ delay 17–27; insulin bump and delay 20–30 | the two SKUs drawn from all five; wave 1 peaks on day 13–23, wave 2 26–32 days later (by day 52; closer waves merge into one); the delays keep their place relative to wave 1, ±2 days |
 
-The timing has its own random generator, so base demand, lead times, starting stock and the daily noise of a seed are the same with either timing. News follows the drawn days. Result files from random timing get `_rt` in their names.
+The scenario has its own random generator, so base demand, lead times, starting stock, daily noise and the size of each disruption are the same for a seed in both scenarios. News follows the drawn SKUs and days. The report shows `cold_days` / `ambient_days`, how many days of current demand each pool can hold, and the prompts refer to them instead of a fixed 21 days. Result files from the random scenario get `_rs` in their names.
 
-**What random timing does and does not fix.** It was added because the correct response to the news was almost a fixed calendar: averaging perfect news reading (`news_extra_days` on the exact events) per task and day over 200 train seeds, and playing that calendar without reading anything, earned 94% of the gain of perfect news reading. With random timing the days really vary, but the calendar still earns 98% of the gain (50 test seeds per task, level-2 news). The main shortcut is not *when* but *which SKU*: each task always disrupts the same SKUs, and extra stock is nearly free with 21 days of storage, so keeping +7 days of the task's usual at-risk SKUs every day, without reading, earns 80% of the gain of perfect news reading (0.895 vs baseline 0.867 and perfect news reading 0.903). Random timing is therefore one ingredient; making news reading necessary also needs the disrupted SKU drawn per seed and stockpiling to cost something. For example, with random timing and storage for 14 days instead of 21, the best fixed "+N days on the at-risk SKUs" earns 49% of the gain of perfect news reading, and "+N days on every SKU" 35% (12 days of storage: 35% and 25%; 40 test seeds per task).
+**Why it exists.** In the fixed tasks the right response to the news is almost a fixed timetable: averaging perfect news reading (`news_extra_days` on the exact events) per task, day and SKU over 200 train seeds, and playing that calendar without reading anything, earned 94% of the gain of perfect news reading. Drawing only the days did not help (98%): the shortcut is mainly *which SKU* each task disrupts, and with 21 days of storage stockpiling it is nearly free (+7 days of the usual at-risk SKUs every day earned 80%). Measured on 50 test seeds per task with level-2 news:
+
+| Agent | Fixed | Random scenario |
+|---|:---:|:---:|
+| Baseline | 0.867 | 0.859 |
+| Calendar per task, day and SKU (no reading) | 0.900 | 0.868 |
+| +3 days on every SKU (no reading) | 0.886 | 0.869 |
+| Perfect news reading | 0.902 | 0.877 |
+| Oracle | 0.931 | 0.925 |
+| **Perfect news reading minus "+3 days on every SKU"** | +0.017 ± 0.003, but a calendar reproduces it | **+0.008 ± 0.003** |
+
+In the random scenario the calendar earns 50% of perfect news reading's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. That margin is small: the perfect news reading rule closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit), so a better reading rule, or reinforcement learning on the environment's reward, has more to gain than imitating it. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
 
 ---
 
@@ -246,7 +257,7 @@ The baseline reaches about 93% of the oracle because the observation holds only 
 | `1` | One fixed template with exact days and multiplier | *SUPPLIER DELAY - insulin: orders placed from day 15 to day 25 will take about 3.7x the normal lead time.* |
 | `2` | Varied wording; timing relative to publication and approximate (±1–2 days); severity in words or a rounded number; drug names instead of SKU ids | *Logistics warning: because of a strike at the cold-chain carrier, deliveries of insulin will be severely delayed, starting in about 5 days, for about 10 days.* |
 
-The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`; add `--random-timing` (`timing="random"`) to draw the disruption days per seed. False alarms and irrelevant news are planned for a later level.
+The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`; add `--random-scenarios` (`scenario="random"`) to draw the disrupted SKUs and days per seed (see [Scenarios](#scenarios-fixed-or-random)). False alarms and irrelevant news are planned for a later level.
 
 **Hybrid agent (`llm_news`).** The baseline does the arithmetic, and the LLM only reads the news and answers with **extra safety days per SKU** (`inference.NEWS_SYSTEM_PROMPT`), e.g. `{"insulin": 6, "paracetamol": 0, ...}`. The extra days are clipped to 0–15 and so that total cover stays within 18 days (storage holds about 21). On days without news the model is not called, so the agent plays exactly like the baseline. A confused model can therefore cost little, and any gain from the news lifts the score *above* the baseline.
 
