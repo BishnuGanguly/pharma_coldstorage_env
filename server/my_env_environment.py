@@ -56,6 +56,7 @@ class PharmaEnvironment(Environment):
         episode_config: Optional[Union[EpisodeConfig, Dict[str, Any]]] = None,
         task_name: Optional[str] = None,
         news: int = 0,
+        timing: str = "fixed",
         **kwargs: Any,
     ) -> InventoryState:
         """
@@ -63,8 +64,9 @@ class PharmaEnvironment(Environment):
 
         The episode is chosen, in order of precedence, from:
           - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
-          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed` and the
+          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`, the
                             news level `news` (0 none, 1 exact, 2 varied; see news.py)
+                            and `timing` ("fixed" or "random" disruption days)
           - the built-in default config
         """
         self._rng = Random(seed)
@@ -74,7 +76,7 @@ class PharmaEnvironment(Environment):
         if episode_config is not None:
             self._episode_config = EpisodeConfig.model_validate(episode_config)
         elif task_name is not None:
-            self._episode_config = get_task_config(task_name, seed, news=news)
+            self._episode_config = get_task_config(task_name, seed, news=news, timing=timing)
         else:
             self._episode_config = self._default_episode_config()
         self._draw_world_noise()

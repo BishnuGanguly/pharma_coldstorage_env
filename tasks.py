@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import exp
+from math import ceil, exp, log, sqrt
 from random import Random
 from typing import Any, Callable, Dict, List, Optional
 
@@ -153,20 +153,52 @@ def _build_episode(
 
 
 # ---------------------------------------------------------------------------
+# Disruption timing
+# ---------------------------------------------------------------------------
+# "fixed": every seed has its disruptions on the same days (the original tasks).
+# "random": the days are drawn per seed, so an agent cannot learn the calendar of
+# a task; the size of each disruption is drawn as before. The timing comes from
+# its own generator, so the episode's other random values (base demand, lead
+# times, starting stock, daily noise) are the same as with fixed timing.
+TIMINGS = ("fixed", "random")
+
+
+def _timing_rng(task_name: str, seed: Optional[int], timing: str) -> Optional[Random]:
+    if timing not in TIMINGS:
+        raise ValueError(f"timing must be one of {TIMINGS}, not {timing!r}")
+    return Random(f"timing|{task_name}|{seed}") if timing == "random" else None
+
+
+def surge_half_width(amplitude: float, width: float) -> float:
+    """Days from the peak of a gaussian_curve to where it falls below 1.5x normal."""
+    return width * sqrt(2 * log(2 * amplitude))
+
+
+# ---------------------------------------------------------------------------
 # Task 1 — Supply Chain Broken (60 days)
 # ---------------------------------------------------------------------------
 
-def supply_chain_broken(seed: Optional[int] = None) -> EpisodeConfig:
+def supply_chain_broken(seed: Optional[int] = None, timing: str = "fixed") -> EpisodeConfig:
     """
     Flat demand; lead times step up for insulin (days 15-25) and then for
     paracetamol (days 30-40). The agent must build safety stock before each
     disruption, even though shelves look fine at the time.
+
+    Random timing: the insulin delay starts on day 10-20 and lasts 9-13 days; the
+    paracetamol delay starts 3-10 days after it ends and lasts 9-13 days.
     """
     rng = Random(seed)
+    trng = _timing_rng("supply_chain_broken", seed, timing)
     D = EPISODE_DAYS
+    insulin_start, insulin_end, para_start, para_end = 15, 25, 30, 40
+    if trng:
+        insulin_start = trng.randint(10, 20)
+        insulin_end = insulin_start + trng.randint(8, 12)
+        para_start = min(insulin_end + trng.randint(3, 10), 45)
+        para_end = para_start + trng.randint(8, 12)
     lead_time_curves = {
-        "insulin":     step_curve(flat_curve(D), 15, 25, rng.uniform(2.0, 5.0), D),
-        "paracetamol": step_curve(flat_curve(D), 30, 40, rng.uniform(2.0, 5.0), D),
+        "insulin":     step_curve(flat_curve(D), insulin_start, insulin_end, rng.uniform(2.0, 5.0), D),
+        "paracetamol": step_curve(flat_curve(D), para_start, para_end, rng.uniform(2.0, 5.0), D),
     }
     return _build_episode("supply_chain_broken", rng, {}, lead_time_curves)
 
@@ -175,19 +207,31 @@ def supply_chain_broken(seed: Optional[int] = None) -> EpisodeConfig:
 # Task 2 — Flu Season (60 days)
 # ---------------------------------------------------------------------------
 
-def task_flu_season(seed: Optional[int] = None) -> EpisodeConfig:
+def task_flu_season(seed: Optional[int] = None, timing: str = "fixed") -> EpisodeConfig:
     """
     Paracetamol demand follows a Gaussian flu wave (peak day 30, 2x amplitude)
     while its lead times step up during days 30-40. The agent must pre-stock
     before the peak.
+
+    Random timing: the wave peaks on day 24-38 at 2.5-3.5x normal (width 8-12),
+    never reaching 1.5x before day 8; the delay starts within 3 days of the peak
+    and lasts 11 days.
     """
     rng = Random(seed)
+    trng = _timing_rng("flu_season", seed, timing)
     D = EPISODE_DAYS
+    peak, amplitude, width, delay_start = 30, 2.0, 10.0, 30
+    if trng:
+        amplitude = trng.uniform(1.5, 2.5)
+        width = trng.uniform(8.0, 12.0)
+        earliest_peak = max(24, ceil(8 + surge_half_width(amplitude, width)))
+        peak = trng.randint(earliest_peak, max(earliest_peak, 38))
+        delay_start = peak + trng.randint(-3, 3)
     demand_curves = {
-        "paracetamol": gaussian_curve(peak_day=30, amplitude=2, width=10, duration=D),
+        "paracetamol": gaussian_curve(peak_day=peak, amplitude=amplitude, width=width, duration=D),
     }
     lead_time_curves = {
-        "paracetamol": step_curve(flat_curve(D), 30, 40, rng.uniform(2.0, 5.0), D),
+        "paracetamol": step_curve(flat_curve(D), delay_start, delay_start + 10, rng.uniform(2.0, 5.0), D),
     }
     return _build_episode("flu_season", rng, demand_curves, lead_time_curves)
 
@@ -196,26 +240,38 @@ def task_flu_season(seed: Optional[int] = None) -> EpisodeConfig:
 # Task 3 — Epidemic Two Waves (60 days)
 # ---------------------------------------------------------------------------
 
-def task_epidemic(seed: Optional[int] = None) -> EpisodeConfig:
+def task_epidemic(seed: Optional[int] = None, timing: str = "fixed") -> EpisodeConfig:
     """
     Two-wave epidemic. Primary SKU: Hydroxychloroquine (HCQ).
 
     Wave 1 peaks at day 17. Wave 2 peaks at day 45 and is larger.
     Between waves there is a trough — the agent must NOT relax.
     Insulin sees a mild secondary elevation.
+
+    Random timing: wave 1 peaks on day 13-23 and wave 2 26-32 days later (by day
+    52); the HCQ and insulin delays keep their place relative to wave 1, each
+    shifted by up to 2 days.
     """
     rng = Random(seed)
+    trng = _timing_rng("epidemic_two_wave", seed, timing)
     D = EPISODE_DAYS
+    wave1, wave2, hcq_delay, insulin_delay = 17, 45, 17, 20
+    if trng:
+        wave1 = trng.randint(13, 23)
+        # 26+ days apart: closer waves merge into one (the trough stays above 1.5x).
+        wave2 = min(wave1 + trng.randint(26, 32), 52)
+        hcq_delay = wave1 + trng.randint(-2, 2)
+        insulin_delay = wave1 + 3 + trng.randint(-2, 2)
     demand_curves = {
         "hydroxychloroquine": combine_curves(
-            gaussian_curve(17, 1.8, 6.0, D),
-            gaussian_curve(45, 2.5, 6.0, D),
+            gaussian_curve(wave1, 1.8, 6.0, D),
+            gaussian_curve(wave2, 2.5, 6.0, D),
         ),
-        "insulin": gaussian_curve(17 + 3, rng.uniform(0.1, 0.2), 10, D),
+        "insulin": gaussian_curve(wave1 + 3, rng.uniform(0.1, 0.2), 10, D),
     }
     lead_time_curves = {
-        "hydroxychloroquine": step_curve(flat_curve(D), 17, 27, rng.uniform(2.0, 5.0), D),
-        "insulin":            step_curve(flat_curve(D), 20, 30, rng.uniform(1.0, 3.0), D),
+        "hydroxychloroquine": step_curve(flat_curve(D), hcq_delay, hcq_delay + 10, rng.uniform(2.0, 5.0), D),
+        "insulin":            step_curve(flat_curve(D), insulin_delay, insulin_delay + 10, rng.uniform(1.0, 3.0), D),
     }
     return _build_episode("epidemic_two_wave", rng, demand_curves, lead_time_curves)
 
@@ -224,7 +280,7 @@ def task_epidemic(seed: Optional[int] = None) -> EpisodeConfig:
 # Task registry
 # ---------------------------------------------------------------------------
 
-TASK_REGISTRY: Dict[str, Callable[[Optional[int]], EpisodeConfig]] = {
+TASK_REGISTRY: Dict[str, Callable[..., EpisodeConfig]] = {
     "supply_chain_broken": supply_chain_broken,
     "flu_season":          task_flu_season,
     "epidemic_two_wave":   task_epidemic,
@@ -239,12 +295,16 @@ TEST_SEEDS = range(10_000, 20_000)
 SEED_SPLITS = {"train": TRAIN_SEEDS, "test": TEST_SEEDS}
 
 
-def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -> EpisodeConfig:
+def get_task_config(
+    task_name: str, seed: Optional[int] = None, news: int = 0, timing: str = "fixed",
+) -> EpisodeConfig:
     """
     Build the EpisodeConfig for a registered task.
 
     news: 0 (none, the original tasks), 1 or 2 announces the task's disruptions
     ahead of time (see news.py). News never changes the episode's world.
+    timing: "fixed" (the original days) or "random" (disruption days drawn per
+    seed, see TIMINGS).
     """
     try:
         task_fn = TASK_REGISTRY[task_name]
@@ -252,7 +312,7 @@ def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -
         raise ValueError(
             f"Unknown task '{task_name}'. Available tasks: {sorted(TASK_REGISTRY)}"
         ) from None
-    return add_news(task_fn(seed), news, seed)
+    return add_news(task_fn(seed, timing=timing), news, seed)
 
 
 # ---------------------------------------------------------------------------

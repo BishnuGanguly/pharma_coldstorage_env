@@ -93,15 +93,17 @@ def run_episode(
     save_steps: bool = False,
     on_day: Optional[Callable[[int, str], None]] = None,
     news: int = 0,
+    timing: str = "fixed",
 ) -> Dict[str, Any]:
     """
     Play one full episode and return a JSON-serialisable record of it.
     `on_day(day, reply)`, if given, is called after every simulated day (e.g. to show progress).
-    `news` is the news level (0 none, 1 exact, 2 varied; see news.py).
+    `news` is the news level (0 none, 1 exact, 2 varied; see news.py); `timing` is
+    "fixed" (the original disruption days) or "random" (drawn per seed).
     """
     agent = make_agent(agent_name, llm)
     env = PharmaEnvironment()
-    obs = env.reset(task_name=task_name, seed=seed, news=news)
+    obs = env.reset(task_name=task_name, seed=seed, news=news, timing=timing)
     agent.start_episode(env)
 
     history: List[Tuple[int, str, str]] = []
@@ -155,6 +157,7 @@ def run_episode(
         "seed": seed,
         "split": split,
         "news": news,
+        "timing": timing,
         "score": round(compute_final_score(obs, env._episode_config), 6),
         "avg_fill": round(fill_total / days, 6) if days else 0.0,
         "stockout_sku_days": stockout_sku_days,
@@ -182,11 +185,13 @@ def evaluate(
     llm: Optional[Dict[str, str]] = None,
     save_steps: bool = False,
     news: int = 0,
+    timing: str = "fixed",
 ) -> List[Dict[str, Any]]:
     """Run `episodes` seeds (the first N of the split) on each task."""
     seeds = list(SEED_SPLITS[split][:episodes])
     jobs = [
-        dict(agent_name=agent_name, task_name=t, seed=s, split=split, llm=llm, save_steps=save_steps, news=news)
+        dict(agent_name=agent_name, task_name=t, seed=s, split=split, llm=llm, save_steps=save_steps, news=news,
+             timing=timing)
         for t in task_names for s in seeds
     ]
     if workers <= 1:
@@ -301,6 +306,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--save-steps", action="store_true", help="also store every day's reply and reward")
     parser.add_argument("--news", type=int, choices=NEWS_LEVELS, default=0,
                         help="announce disruptions ahead: 0 no news (default), 1 exact template, 2 varied wording")
+    parser.add_argument("--random-timing", action="store_true",
+                        help="draw each episode's disruption days from its seed instead of the fixed days")
     parser.add_argument("--out", type=Path, help="output .jsonl path")
     parser.add_argument("--model", default=inference.MODEL_NAME, help="llm: model name")
     parser.add_argument("--base-url", default=inference.API_BASE_URL, help="llm: OpenAI-compatible endpoint")
@@ -336,10 +343,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                "timeout": args.timeout, "action": args.action}
     workers = args.workers or (1 if llm else min(os.cpu_count() or 1, 8))
 
-    records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps, args.news)
+    timing = "random" if args.random_timing else "fixed"
+    records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps, args.news,
+                       timing)
     name = args.agent if not llm else args.agent + "_" + re.sub(r"[^A-Za-z0-9.]+", "-", args.model)
     news = f"_news{args.news}" if args.news else ""
-    out = args.out or ROOT / "results" / f"{name}{news}_{args.split}_{args.episodes}.jsonl"
+    rt = "_rt" if args.random_timing else ""
+    out = args.out or ROOT / "results" / f"{name}{news}{rt}_{args.split}_{args.episodes}.jsonl"
     write_jsonl(out, records)
     print_summary(records)
     print(f"\n{len(records)} episodes written to {out}")

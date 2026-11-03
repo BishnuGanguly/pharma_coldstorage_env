@@ -170,6 +170,20 @@ The trough between waves (days 27–40) is a trap: demand is low but the agent m
 
 ![Epidemic Two Wave — HCQ Demand](plots/task3_epidemic.png)
 
+### Disruption timing: fixed or random
+
+By default the disruptions above happen on the same days in every seed; only their size changes. With **random timing** (`timing="random"` in `env.reset` / `get_task_config`, `--random-timing` in `eval.py` and `local_llm/run_local_llm.py`) the days are drawn per seed:
+
+| Task | Fixed days | Random timing |
+|---|---|---|
+| Supply Chain Broken | insulin delay 15–25; paracetamol delay 30–40 | insulin delay starts on day 10–20 and lasts 9–13 days; paracetamol delay starts 3–10 days after it ends and lasts 9–13 days |
+| Flu Season | demand peak day 30 (2× extra, width 10); delay 30–40 | peak on day 24–38 at 1.5–2.5× extra, width 8–12 (never 1.5× normal before day 8); delay starts within 3 days of the peak and lasts 11 days |
+| Epidemic Two Waves | waves peak on days 17 and 45; HCQ delay 17–27; insulin delay 20–30 | wave 1 peaks on day 13–23, wave 2 26–32 days later (by day 52; closer waves would merge into one); the delays keep their place relative to wave 1, ±2 days |
+
+The timing has its own random generator, so base demand, lead times, starting stock and the daily noise of a seed are the same with either timing. News follows the drawn days. Result files from random timing get `_rt` in their names.
+
+**What random timing does and does not fix.** It was added because the correct response to the news was almost a fixed calendar: averaging perfect news reading (`news_extra_days` on the exact events) per task and day over 200 train seeds, and playing that calendar without reading anything, earned 94% of the gain of perfect news reading. With random timing the days really vary, but the calendar still earns 98% of the gain (50 test seeds per task, level-2 news). The main shortcut is not *when* but *which SKU*: each task always disrupts the same SKUs, and extra stock is nearly free with 21 days of storage, so keeping +7 days of the task's usual at-risk SKUs every day, without reading, earns 80% of the gain of perfect news reading (0.895 vs baseline 0.867 and perfect news reading 0.903). Random timing is therefore one ingredient; making news reading necessary also needs the disrupted SKU drawn per seed and stockpiling to cost something. For example, with random timing and storage for 14 days instead of 21, the best fixed "+N days on the at-risk SKUs" earns 49% of the gain of perfect news reading, and "+N days on every SKU" 35% (12 days of storage: 35% and 25%; 40 test seeds per task).
+
 ---
 
 ## Scoring
@@ -232,7 +246,7 @@ The baseline reaches about 93% of the oracle because the observation holds only 
 | `1` | One fixed template with exact days and multiplier | *SUPPLIER DELAY - insulin: orders placed from day 15 to day 25 will take about 3.7x the normal lead time.* |
 | `2` | Varied wording; timing relative to publication and approximate (±1–2 days); severity in words or a rounded number; drug names instead of SKU ids | *Logistics warning: because of a strike at the cold-chain carrier, deliveries of insulin will be severely delayed, starting in about 5 days, for about 10 days.* |
 
-The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`. False alarms and irrelevant news are planned for a later level.
+The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`; add `--random-timing` (`timing="random"`) to draw the disruption days per seed. False alarms and irrelevant news are planned for a later level.
 
 **Hybrid agent (`llm_news`).** The baseline does the arithmetic, and the LLM only reads the news and answers with **extra safety days per SKU** (`inference.NEWS_SYSTEM_PROMPT`), e.g. `{"insulin": 6, "paracetamol": 0, ...}`. The extra days are clipped to 0–15 and so that total cover stays within 18 days (storage holds about 21). On days without news the model is not called, so the agent plays exactly like the baseline. A confused model can therefore cost little, and any gain from the news lifts the score *above* the baseline.
 
