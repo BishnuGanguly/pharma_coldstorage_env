@@ -1,0 +1,1 @@
+{"agent": "baseline", "model": null, "task": "flu_season", "seed": 10000, "split": "test", "score": 0.901471, "avg_fill": 0.904678, "stockout_sku_days": 31, "overflow_days": 2, "units_wasted": 2580.09, "parse_failures": 0, "llm_errors": 0, "days": 60}

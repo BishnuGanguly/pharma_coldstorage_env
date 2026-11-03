@@ -1,0 +1,1 @@
+{"agent": "oracle", "model": null, "task": "flu_season", "seed": 10000, "split": "test", "score": 0.93238, "avg_fill": 0.93238, "stockout_sku_days": 21, "overflow_days": 0, "units_wasted": 0.0, "parse_failures": 0, "llm_errors": 0, "days": 60}
