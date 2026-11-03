@@ -218,7 +218,7 @@ Mean final score on the first 50 test seeds per task (`python eval.py --agent <a
 | Baseline (order-up-to rule) | 0.846 ± 0.008 | 0.900 ± 0.004 | 0.856 ± 0.009 |
 | Oracle (perfect foresight, ceiling) | 0.931 ± 0.002 | 0.931 ± 0.002 | 0.932 ± 0.002 |
 
-The oracle is not 1.0 because episodes start with almost no stock: the first days are lost for every agent until a first delivery can arrive. LLM results are still to be published.
+The oracle is not 1.0 because episodes start with almost no stock: the first days are lost for every agent until a first delivery can arrive. Results for small LLMs are in [LLM results](#llm-results).
 
 ## News: disruptions announced ahead of time
 
@@ -245,6 +245,30 @@ The observation's `news` list holds every item already published whose event has
 | Oracle | 0.931 ± 0.002 | 0.931 ± 0.002 | 0.932 ± 0.002 | 100% |
 
 Level 2 gives nearly the same scores (0.903 overall, 55% of the gap), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.036 it recovers from the text alone, especially at level 2.
+
+## LLM results
+
+Small models run locally with Ollama (`local_llm/run_local_llm.py`, temperature 0.2) on test seeds. Every run below is scored under the **current** reward (fill weighted by `stockout_penalty`): each episode saved the exact order sent every day, and since a seed fixes the world, replaying those orders in the current environment reproduces the run exactly (the same fill rate for every SKU on every day) and gives its score under today's reward. The reference agents are scored on the same seeds. The prompts also changed between runs (each run used the prompt of its answer format at the time); rescoring changes only the reward, not what the model saw.
+
+| Model | Answer format | News | Episodes | Score | Baseline | +2 days for every SKU | Oracle |
+|---|---|---|---|:---:|:---:|:---:|:---:|
+| Qwen 2.5 1.5B | `units` | — | flu_season, seed 10000 | 0.000 | 0.895 | 0.900 | 0.923 |
+| Gemma 2 2B | `units` | — | flu_season, seed 10000 | 0.420 | 0.895 | 0.900 | 0.923 |
+| Gemma 2 2B | `days` | — | 3 tasks × seed 10000 | 0.747 | 0.875 | 0.893 | 0.936 |
+| Qwen 2.5 3B | `days` | — | 3 tasks × seed 10000 | 0.521 | 0.875 | 0.893 | 0.936 |
+| Phi-4-mini (3.8B) | `adjust` | — | 3 tasks × seed 10000 | 0.886 | 0.875 | 0.893 | 0.936 |
+| **Phi-4-mini (3.8B)** | **`adjust`** | **level 2** | **3 tasks × seeds 10000–10002** | **0.881** | **0.874** | **0.884** | **0.935** |
+
+"+2 days for every SKU" is a fixed answer in the `adjust` format that never reads the report: a reference for "keep a little more stock". For the news run, perfect news reading (the `news_extra_days` rule on the exact events, answered in the `adjust` format) scores 0.900 on the same 9 episodes.
+
+What each run showed:
+
+- **`units` (Qwen 1.5B, Gemma 2B):** the models copied numbers instead of computing orders. Qwen 1.5B answered `{"insulin": 100}` every day, copying the prompt's example: nothing else was ever ordered, and 100 insulin a day overflowed cold storage on 35 of 60 days, so the waste penalty cancelled what insulin earned (score clipped to 0). Gemma 2B copied the report's `inventory_on_hand` values as order sizes (3-6 units of paracetamol a day against a demand of several hundred). Its 0.420 comes almost entirely from insulin and HCQ, the two SKUs it kept mostly in stock (86% and 73% filled), which carry 45% and 16% of the reward weight; paracetamol was 1% filled.
+- **`days` (Gemma 2B, Qwen 3B):** the code does the arithmetic, which removed the copying of report values as quantities, but the models copied `days_of_cover` (what they already had) as their target. Stock ran down until nothing was reordered; Gemma then jumped to 30 days at a time and overflowed storage (17,000-81,000 units wasted per episode), and Qwen let its targets fall to 0: it kept insulin about 89% filled while the other SKUs mostly ran out (189-247 stockout SKU-days per episode; on epidemic_two_wave it ordered nothing but insulin from day 1).
+- **`adjust` without news (Phi-4-mini):** valid JSON every day and no collapse, +0.011 over the baseline, but below the fixed "+2 days for every SKU" (0.893): its gain is "keep a little more stock", not reading the report.
+- **`adjust` with level-2 news (Phi-4-mini, 9 episodes):** +0.007 ± 0.016 over the baseline (95% CI, not significant), 11% of the gap to the oracle (perfect news reading: 43%). It picks the right SKU and roughly the right timing (insulin from the day a cold-chain strike is announced until it ends), but the amounts are off: +5 where about +14 is needed for an insulin delay, and +10 to +19 days of paracetamol after the flu peak, which wasted 6,700-13,000 units per flu_season episode and made that task worse than the baseline (-0.020). It also adds days with no news (insulin and HCQ on days 1-8) and alternates between +7 and nothing on consecutive days with the same news.
+
+**So far:** the `adjust` format made small models safe (no run in it falls far below the baseline), but none has yet shown a reliable gain from reasoning: every LLM result is at or below a fixed "+2 days for every SKU". These are few episodes; compare runs seed by seed with `eval.py --compare`, and use more seeds (`--episodes 5`) before drawing conclusions.
 
 ## Evaluating an agent
 
