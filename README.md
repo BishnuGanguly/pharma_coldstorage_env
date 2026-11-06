@@ -335,6 +335,10 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 
 ---
 
+## Training reward (GRPO)
+
+`training/grpo_reward.py` scores answers in the `adjust` format for GRPO training, using the simulator only (no model calls). One prompt is one day with visible news in the random scenario (level-2 news, train seeds), rebuilt by letting the baseline play the earlier days. An answer's reward is how much better than answering 0 it does over the next 15 days (the answer sets today's order, then the baseline orders), averaged over 4 possible futures that every answer to the same prompt shares, in points (hundredths of a day's reward, per day), with small penalties for an answer without JSON (-1) or with values outside 0..10 (-0.25). The rules and the measurements behind each one are in [`training/REWARD.md`](training/REWARD.md). Scoring a group of 8 answers takes about 0.1 s.
+
 ## Setup
 
 ```bash

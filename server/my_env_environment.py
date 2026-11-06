@@ -97,6 +97,21 @@ class PharmaEnvironment(Environment):
         self._demand_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
         self._lead_time_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
 
+    def resample_future_noise(self, rng: Random) -> None:
+        """
+        Redraw the demand and lead-time noise from today on, from `rng`: one possible
+        future, as far as the agent can know. Today is included because today's
+        demand and the lead time of an order placed today are not known when the
+        agent decides. Meant for copies of an environment (e.g. to score an action
+        over several possible futures, training/grpo_reward.py); a normal episode
+        never calls it.
+        """
+        today = self._inventory_state.current_date
+        for table in (self._demand_z, self._lead_time_z):
+            for sku_id, values in table.items():
+                for day in range(today, len(values)):
+                    values[day] = rng.gauss(0.0, 1.0)
+
     def _build_initial_state(self) -> InventoryState:
         cfg = self._episode_config
         skus = {
