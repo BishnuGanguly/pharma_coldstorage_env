@@ -174,3 +174,14 @@ def test_summarize_run_prints_scores_and_news_days(fake_server, tmp_path, capsys
     assert all(line.startswith("  day ") for line in out[1:])
     with pytest.raises(SystemExit, match="No such file"):
         S.main([str(tmp_path / "missing.jsonl")])
+
+
+def test_random_scenarios_results_get_their_own_file_names(fake_server, tmp_path):
+    R.main(["--base-url", fake_server, "--seed", "10000", "--random-scenarios", "--show", "0",
+            "--results-dir", str(tmp_path)])
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names == ["baseline_test_rs_flu_season_seed10000.jsonl",
+                     "llm_pharma-gemma2-2b_test_rs_flu_season_seed10000.jsonl",
+                     "oracle_test_rs_flu_season_seed10000.jsonl"]
+    record = json.loads((tmp_path / names[1]).read_text())
+    assert record["scenario"] == "random"

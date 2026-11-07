@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import exp
+from math import ceil, exp, log, sqrt
 from random import Random
 from typing import Any, Callable, Dict, List, Optional
 
@@ -153,78 +153,154 @@ def _build_episode(
 
 
 # ---------------------------------------------------------------------------
+# Scenarios: fixed or random
+# ---------------------------------------------------------------------------
+# "fixed": the original tasks. Every seed disrupts the same SKUs on the same days;
+#   only the size of each disruption changes.
+# "random": per seed, the disrupted SKUs and the disruption days are drawn, and
+#   storage holds RANDOM_STORAGE_DAYS of demand instead of 21. With fixed SKUs and
+#   21 days of storage, stockpiling a task's usual SKUs every day, without reading
+#   the news, earned most of what perfect news reading earns; drawing the SKUs and
+#   making stockpiling overflow sooner leaves most of that gain to reading.
+# The scenario has its own generator, so a seed's other random values (base demand,
+# lead times, starting stock, daily noise, the size of each disruption) are the
+# same in both scenarios.
+SCENARIOS = ("fixed", "random")
+RANDOM_STORAGE_DAYS = 14.0
+SKU_IDS = tuple(SKU_CATALOGUE)
+
+
+def _scenario_rng(task_name: str, seed: Optional[int], scenario: str) -> Optional[Random]:
+    if scenario not in SCENARIOS:
+        raise ValueError(f"scenario must be one of {SCENARIOS}, not {scenario!r}")
+    return Random(f"scenario|{task_name}|{seed}") if scenario == "random" else None
+
+
+def _storage_days(srng: Optional[Random]) -> Dict[str, float]:
+    days = RANDOM_STORAGE_DAYS if srng else AMBIENT_STORAGE_DAYS
+    return {"ambient_storage_days": days, "cold_storage_days": days if srng else COLD_STORAGE_DAYS}
+
+
+def surge_half_width(amplitude: float, width: float) -> float:
+    """Days from the peak of a gaussian_curve to where it falls below 1.5x normal."""
+    return width * sqrt(2 * log(2 * amplitude))
+
+
+# ---------------------------------------------------------------------------
 # Task 1 — Supply Chain Broken (60 days)
 # ---------------------------------------------------------------------------
 
-def supply_chain_broken(seed: Optional[int] = None) -> EpisodeConfig:
+def supply_chain_broken(seed: Optional[int] = None, scenario: str = "fixed") -> EpisodeConfig:
     """
     Flat demand; lead times step up for insulin (days 15-25) and then for
     paracetamol (days 30-40). The agent must build safety stock before each
     disruption, even though shelves look fine at the time.
+
+    Random scenario: two different SKUs are delayed, drawn from all five. The first
+    delay starts on day 10-20 and lasts 9-13 days; the second starts 3-10 days after
+    it ends and lasts 9-13 days.
     """
     rng = Random(seed)
+    srng = _scenario_rng("supply_chain_broken", seed, scenario)
     D = EPISODE_DAYS
+    first, second = "insulin", "paracetamol"
+    first_start, first_end, second_start, second_end = 15, 25, 30, 40
+    if srng:
+        first, second = srng.sample(SKU_IDS, 2)
+        first_start = srng.randint(10, 20)
+        first_end = first_start + srng.randint(8, 12)
+        second_start = min(first_end + srng.randint(3, 10), 45)
+        second_end = second_start + srng.randint(8, 12)
     lead_time_curves = {
-        "insulin":     step_curve(flat_curve(D), 15, 25, rng.uniform(2.0, 5.0), D),
-        "paracetamol": step_curve(flat_curve(D), 30, 40, rng.uniform(2.0, 5.0), D),
+        first:  step_curve(flat_curve(D), first_start, first_end, rng.uniform(2.0, 5.0), D),
+        second: step_curve(flat_curve(D), second_start, second_end, rng.uniform(2.0, 5.0), D),
     }
-    return _build_episode("supply_chain_broken", rng, {}, lead_time_curves)
+    return _build_episode("supply_chain_broken", rng, {}, lead_time_curves, **_storage_days(srng))
 
 
 # ---------------------------------------------------------------------------
 # Task 2 — Flu Season (60 days)
 # ---------------------------------------------------------------------------
 
-def task_flu_season(seed: Optional[int] = None) -> EpisodeConfig:
+def task_flu_season(seed: Optional[int] = None, scenario: str = "fixed") -> EpisodeConfig:
     """
     Paracetamol demand follows a Gaussian flu wave (peak day 30, 2x amplitude)
     while its lead times step up during days 30-40. The agent must pre-stock
     before the peak.
+
+    Random scenario: the wave hits one SKU drawn from all five. It peaks on day 24-38
+    at 2.5-3.5x normal (width 8-12), never reaching 1.5x before day 8; the same SKU's
+    delay starts within 3 days of the peak and lasts 11 days.
     """
     rng = Random(seed)
+    srng = _scenario_rng("flu_season", seed, scenario)
     D = EPISODE_DAYS
+    sku = "paracetamol"
+    peak, amplitude, width, delay_start = 30, 2.0, 10.0, 30
+    if srng:
+        sku = srng.choice(SKU_IDS)
+        amplitude = srng.uniform(1.5, 2.5)
+        width = srng.uniform(8.0, 12.0)
+        earliest_peak = max(24, ceil(8 + surge_half_width(amplitude, width)))
+        peak = srng.randint(earliest_peak, max(earliest_peak, 38))
+        delay_start = peak + srng.randint(-3, 3)
     demand_curves = {
-        "paracetamol": gaussian_curve(peak_day=30, amplitude=2, width=10, duration=D),
+        sku: gaussian_curve(peak_day=peak, amplitude=amplitude, width=width, duration=D),
     }
     lead_time_curves = {
-        "paracetamol": step_curve(flat_curve(D), 30, 40, rng.uniform(2.0, 5.0), D),
+        sku: step_curve(flat_curve(D), delay_start, delay_start + 10, rng.uniform(2.0, 5.0), D),
     }
-    return _build_episode("flu_season", rng, demand_curves, lead_time_curves)
+    return _build_episode("flu_season", rng, demand_curves, lead_time_curves, **_storage_days(srng))
 
 
 # ---------------------------------------------------------------------------
 # Task 3 — Epidemic Two Waves (60 days)
 # ---------------------------------------------------------------------------
 
-def task_epidemic(seed: Optional[int] = None) -> EpisodeConfig:
+def task_epidemic(seed: Optional[int] = None, scenario: str = "fixed") -> EpisodeConfig:
     """
     Two-wave epidemic. Primary SKU: Hydroxychloroquine (HCQ).
 
     Wave 1 peaks at day 17. Wave 2 peaks at day 45 and is larger.
     Between waves there is a trough — the agent must NOT relax.
     Insulin sees a mild secondary elevation.
+
+    Random scenario: the primary and secondary SKUs (HCQ and insulin above) are two
+    different SKUs drawn from all five. Wave 1 peaks on day 13-23 and wave 2 26-32
+    days later (by day 52); the two delays keep their place relative to wave 1, each
+    shifted by up to 2 days.
     """
     rng = Random(seed)
+    srng = _scenario_rng("epidemic_two_wave", seed, scenario)
     D = EPISODE_DAYS
+    primary, secondary = "hydroxychloroquine", "insulin"
+    wave1, wave2, primary_delay, secondary_delay = 17, 45, 17, 20
+    if srng:
+        primary, secondary = srng.sample(SKU_IDS, 2)
+        wave1 = srng.randint(13, 23)
+        # 26+ days apart: closer waves merge into one (the trough stays above 1.5x).
+        wave2 = min(wave1 + srng.randint(26, 32), 52)
+        primary_delay = wave1 + srng.randint(-2, 2)
+        secondary_delay = wave1 + 3 + srng.randint(-2, 2)
     demand_curves = {
-        "hydroxychloroquine": combine_curves(
-            gaussian_curve(17, 1.8, 6.0, D),
-            gaussian_curve(45, 2.5, 6.0, D),
+        primary: combine_curves(
+            gaussian_curve(wave1, 1.8, 6.0, D),
+            gaussian_curve(wave2, 2.5, 6.0, D),
         ),
-        "insulin": gaussian_curve(17 + 3, rng.uniform(0.1, 0.2), 10, D),
+        secondary: gaussian_curve(wave1 + 3, rng.uniform(0.1, 0.2), 10, D),
     }
     lead_time_curves = {
-        "hydroxychloroquine": step_curve(flat_curve(D), 17, 27, rng.uniform(2.0, 5.0), D),
-        "insulin":            step_curve(flat_curve(D), 20, 30, rng.uniform(1.0, 3.0), D),
+        primary:   step_curve(flat_curve(D), primary_delay, primary_delay + 10, rng.uniform(2.0, 5.0), D),
+        secondary: step_curve(flat_curve(D), secondary_delay, secondary_delay + 10, rng.uniform(1.0, 3.0), D),
     }
-    return _build_episode("epidemic_two_wave", rng, demand_curves, lead_time_curves)
+    return _build_episode("epidemic_two_wave", rng, demand_curves, lead_time_curves, **_storage_days(srng))
 
 
 # ---------------------------------------------------------------------------
 # Task registry
 # ---------------------------------------------------------------------------
 
-TASK_REGISTRY: Dict[str, Callable[[Optional[int]], EpisodeConfig]] = {
+TASK_REGISTRY: Dict[str, Callable[..., EpisodeConfig]] = {
     "supply_chain_broken": supply_chain_broken,
     "flu_season":          task_flu_season,
     "epidemic_two_wave":   task_epidemic,
@@ -239,12 +315,16 @@ TEST_SEEDS = range(10_000, 20_000)
 SEED_SPLITS = {"train": TRAIN_SEEDS, "test": TEST_SEEDS}
 
 
-def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -> EpisodeConfig:
+def get_task_config(
+    task_name: str, seed: Optional[int] = None, news: int = 0, scenario: str = "fixed",
+) -> EpisodeConfig:
     """
     Build the EpisodeConfig for a registered task.
 
     news: 0 (none, the original tasks), 1 or 2 announces the task's disruptions
     ahead of time (see news.py). News never changes the episode's world.
+    scenario: "fixed" (the original tasks) or "random" (disrupted SKUs and days drawn
+    per seed, less storage; see SCENARIOS).
     """
     try:
         task_fn = TASK_REGISTRY[task_name]
@@ -252,7 +332,7 @@ def get_task_config(task_name: str, seed: Optional[int] = None, news: int = 0) -
         raise ValueError(
             f"Unknown task '{task_name}'. Available tasks: {sorted(TASK_REGISTRY)}"
         ) from None
-    return add_news(task_fn(seed), news, seed)
+    return add_news(task_fn(seed, scenario=scenario), news, seed)
 
 
 # ---------------------------------------------------------------------------

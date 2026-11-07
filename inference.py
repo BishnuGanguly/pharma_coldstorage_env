@@ -88,6 +88,8 @@ _PROMPT_INTRO = textwrap.dedent("""
     Two storage pools:
       cold_storage  — refrigerated, for cold-chain SKUs only (cold_storage_required = True).
       ambient       — standard storage, for all other SKUs.
+    cold_days and ambient_days in the report: how many days of current demand each pool can
+    hold, for all its SKUs together (null until any demand has been observed).
     Do not order quantities that would exceed available capacity.
     
     SKUS
@@ -162,10 +164,10 @@ _DAYS_RULES = textwrap.dedent("""
     4. If lead_time_last3_orders is rising, suppliers are slowing down: choose a few more days.
     5. If avg_demand_last_5_days is clearly above avg_demand_per_day, demand is rising:
        choose a few more days.
-    6. Each storage pool holds only about 21 days of its SKUs' demand, shared by all SKUs in
-       the pool (watch cold_ratio and ambient_ratio). Large targets overflow storage, and
-       deliveries that do not fit are wasted; wasted cold-storage (insulin) deliveries cost
-       the most. Targets near the 21-day limit for every SKU waste stock.
+    6. Each storage pool holds only cold_days / ambient_days days of its SKUs' demand, shared
+       by all SKUs in the pool (watch cold_ratio and ambient_ratio). Large targets overflow
+       storage, and deliveries that do not fit are wasted; wasted cold-storage (insulin)
+       deliveries cost the most. Targets near that limit for every SKU waste stock.
     7. Give more days to SKUs with a high stockout_penalty, especially when storage is tight.
     8. Until some demand has been observed (days_of_cover is null), nothing can be ordered,
        whatever you choose.
@@ -205,8 +207,8 @@ _ADJUST_RULES = textwrap.dedent("""
     6. News: for an announced supplier delay, add about (slowdown factor - 1) x avg_lead_time
        days from the day the news appears until the delay is over; for an announced demand
        surge, add a few days until its peak. Products the news does not mention: no change.
-    7. Storage: each pool holds only about 21 days of its SKUs' demand, shared by all its
-       SKUs. Large adjustments for many SKUs at once overflow storage, and deliveries that do
+    7. Storage: each pool holds only cold_days / ambient_days days of its SKUs' demand,
+       shared by all its SKUs. Large adjustments for many SKUs at once overflow storage, and deliveries that do
        not fit are wasted; wasted insulin costs the most. If cold_ratio or ambient_ratio is
        high, add days only where a shortage is likely, favouring a higher stockout_penalty.
     8. Adjustments run from 0 to +10 days.
@@ -293,6 +295,18 @@ def days_of_cover(on_hand: float, inbound: float, recent_demand: float) -> Optio
     return round((on_hand + inbound) / recent_demand, 1)
 
 
+def storage_days(obs: InventoryState, cold: bool) -> Optional[float]:
+    """
+    Days of current demand a storage pool can hold for all its SKUs together:
+    capacity / sum of recent daily demand (the larger of the last-5-day and overall
+    averages) of the SKUs stored in it. None until any demand has been observed.
+    """
+    total = obs.cold_storage_total_capacity if cold else obs.ambient_storage_total_capacity
+    demand = sum(max(s.avg_demand_last_5_days, s.avg_demand_per_day)
+                 for s in obs.skus.values() if bool(s.cold_storage_required) == cold)
+    return round(total / demand, 1) if demand > 0 else None
+
+
 def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict[str, Any]:
     """
     Convert InventoryState to a clean dict for the LLM prompt.
@@ -313,6 +327,8 @@ def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict
             "ambient_total": round(obs.ambient_storage_total_capacity, 1),
             "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
             "ambient_ratio": round(obs.ambient_storage_ratio, 3),
+            "cold_days":     storage_days(obs, cold=True),
+            "ambient_days":  storage_days(obs, cold=False),
         },
         "expected_inbound_orders": obs.expected_inbound_orders,
         "inventory": {

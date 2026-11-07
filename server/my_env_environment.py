@@ -56,6 +56,7 @@ class PharmaEnvironment(Environment):
         episode_config: Optional[Union[EpisodeConfig, Dict[str, Any]]] = None,
         task_name: Optional[str] = None,
         news: int = 0,
+        scenario: str = "fixed",
         **kwargs: Any,
     ) -> InventoryState:
         """
@@ -63,8 +64,9 @@ class PharmaEnvironment(Environment):
 
         The episode is chosen, in order of precedence, from:
           - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
-          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed` and the
+          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`, the
                             news level `news` (0 none, 1 exact, 2 varied; see news.py)
+                            and `scenario` ("fixed" tasks or "random" SKUs and days)
           - the built-in default config
         """
         self._rng = Random(seed)
@@ -74,7 +76,7 @@ class PharmaEnvironment(Environment):
         if episode_config is not None:
             self._episode_config = EpisodeConfig.model_validate(episode_config)
         elif task_name is not None:
-            self._episode_config = get_task_config(task_name, seed, news=news)
+            self._episode_config = get_task_config(task_name, seed, news=news, scenario=scenario)
         else:
             self._episode_config = self._default_episode_config()
         self._draw_world_noise()
@@ -94,6 +96,21 @@ class PharmaEnvironment(Environment):
         skus = list(self._episode_config.skus)
         self._demand_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
         self._lead_time_z = {sku_id: [self._rng.gauss(0.0, 1.0) for _ in range(days)] for sku_id in skus}
+
+    def resample_future_noise(self, rng: Random) -> None:
+        """
+        Redraw the demand and lead-time noise from today on, from `rng`: one possible
+        future, as far as the agent can know. Today is included because today's
+        demand and the lead time of an order placed today are not known when the
+        agent decides. Meant for copies of an environment (e.g. to score an action
+        over several possible futures, training/grpo_reward.py); a normal episode
+        never calls it.
+        """
+        today = self._inventory_state.current_date
+        for table in (self._demand_z, self._lead_time_z):
+            for sku_id, values in table.items():
+                for day in range(today, len(values)):
+                    values[day] = rng.gauss(0.0, 1.0)
 
     def _build_initial_state(self) -> InventoryState:
         cfg = self._episode_config

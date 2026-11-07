@@ -152,6 +152,7 @@ the target to aim for. Replies on days without news are logged as
 | `--timeout` | `600` | Seconds allowed per model call |
 | `--agent` | `llm` | `llm`: the model decides every order; `llm_news`: the model reads the news, the baseline orders |
 | `--news` | `0` | Announce disruptions ahead: `0` none, `1` exact template, `2` varied wording |
+| `--random-scenarios` | off | Draw each episode's disrupted SKUs and days from its seed, with 14 days of storage (see the main README); result files get `_rs` in their names |
 | `--action` | `adjust` | `adjust`: extra days (0 to +10) on top of a sensible default per SKU; `days`: days of stock per SKU; `units`: units to order |
 | `--show` | `10` | How many of the model's replies to print |
 | `--split` | `test` | `train` or `test` seeds |
