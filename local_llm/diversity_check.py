@@ -35,24 +35,13 @@ import inference  # noqa: E402
 import run_local_llm as R  # noqa: E402
 from tasks import TASK_REGISTRY, TRAIN_SEEDS  # noqa: E402
 from training.grpo_reward import DayPrompt, GRPOReward, build_state, news_day_prompts, prompt_messages  # noqa: E402
+from training.probe import REFERENCE_DAYS, news_skus, reference_rewards  # noqa: E402,F401
 
 DEFAULT_MODEL = "phi4-mini"
-REFERENCE_DAYS = (0, 2, 4, 7, 10)  # answers tried on a prompt's news SKUs to see whether its answer matters
 MIN_SPREAD = 0.5                   # points between the best and worst reference answer: "the answer matters"
 # Verdict thresholds per prompt: at least this many different answers, and this spread of rewards.
 MIN_DISTINCT = 3
 MIN_REWARD_SD = 0.1
-
-
-def news_skus(prompt: DayPrompt) -> List[str]:
-    env, _, _ = build_state(prompt)
-    return sorted({e.sku_id for e in env._episode_config.news if e.announce_day <= prompt.day <= e.end_day})
-
-
-def reference_rewards(reward: GRPOReward, prompt: DayPrompt) -> Dict[int, float]:
-    """The reward of answering 0, +2, +4, +7 and +10 days for the SKUs in the news."""
-    skus = news_skus(prompt)
-    return {v: reward.score_answer(prompt, json.dumps({k: v for k in skus}))["reward"] for v in REFERENCE_DAYS}
 
 
 def pick_prompts(reward: GRPOReward, count: int, seeds: Sequence[int]) -> List[DayPrompt]:

@@ -339,6 +339,31 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 
 `training/grpo_reward.py` scores answers in the `adjust` format for GRPO training, using the simulator only (no model calls). One prompt is one day with visible news in the random scenario (level-2 news, train seeds), rebuilt by letting the baseline play the earlier days. An answer's reward is how much better than answering 0 it does over the next 15 days (the answer sets today's order, then the baseline orders), averaged over 4 possible futures that every answer to the same prompt shares, in points (hundredths of a day's reward, per day), with small penalties for an answer without JSON (-1) or with values outside 0..10 (-0.25). The rules and the measurements behind each one are in [`training/REWARD.md`](training/REWARD.md). Scoring a group of 8 answers takes about 0.1 s.
 
+## Training Phi-4-mini with GRPO (Kaggle)
+
+`training/grpo_phi4mini_kaggle.ipynb` is the full run, in clearly separated cells:
+
+1. setup;
+2. Phi-4-mini in 4-bit with LoRA (Unsloth);
+3. training prompts (news days, train seeds 0–8999) and a probe exam on held-out seeds 9000–9099;
+4. the untrained model on test seeds;
+5. GRPO with health metrics and a probe exam every 25 steps;
+6. saving the LoRA adapter;
+7. after-training evaluation: test-seed probe, full 60-day episodes against the baseline, "+3 everywhere", perfect news reading and the oracle with paired 95% intervals, plus news-0 and fixed-scenario checks;
+8. a verdict, a GGUF export for Ollama, and a results zip.
+
+**To run it on Kaggle:**
+1. Create a new notebook and import this `.ipynb` (File → Import Notebook).
+2. Turn on GPU T4 ×1 and Internet.
+3. Choose *Save Version → Save & Run All*.
+
+It takes about 6–8 h with the default config. For a quick first run, lower `TRAIN_STEPS` and `EVAL_SEEDS` in the config cell.
+
+The notebook's GPU-free helpers are tested in `tests/test_training_helpers.py`:
+- `training/probe.py`: the probe exam;
+- `training/episodes.py`: batched full episodes with a local model;
+- `training/monitor.py`: the training-health numbers.
+
 ## Setup
 
 ```bash
