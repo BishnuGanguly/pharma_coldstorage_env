@@ -255,7 +255,7 @@ The baseline reaches about 93% of the oracle because the observation holds only 
 |---|---|---|
 | `0` | No news (the original environment, the default) | — |
 | `1` | One fixed template with exact days and multiplier | *SUPPLIER DELAY - insulin: orders placed from day 15 to day 25 will take about 3.7x the normal lead time.* |
-| `2` | Varied wording; timing relative to publication and approximate (±1–2 days); severity in words or a rounded number; drug names instead of SKU ids | *Logistics warning: because of a strike at the cold-chain carrier, deliveries of insulin will be severely delayed, starting in about 5 days, for about 10 days.* |
+| `2` | Varied wording; timing relative to publication and approximate (±1–2 days); severity in words or a rounded number; generic product names (*blood-pressure medication* for `bp_medication`) | *Logistics warning: because of a strike at the cold-chain carrier, deliveries of insulin will be severely delayed, starting in about 5 days, for about 10 days.* |
 
 The observation's `news` list holds every item already published whose event has not ended, each prefixed with its publication day (`"Day 9: ..."`). It also appears in the LLM report when not empty. Use it with `eval.py --news 1` or `--news 2`, or `env.reset(task_name=..., seed=..., news=2)`; add `--random-scenarios` (`scenario="random"`) to draw the disrupted SKUs and days per seed (see [Scenarios](#scenarios-fixed-or-random)). False alarms and irrelevant news are planned for a later level.
 

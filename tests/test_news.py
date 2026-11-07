@@ -200,3 +200,18 @@ def test_news_prompt_has_no_example_answer():
         obs = env.step(PharmaAction(message="{}"))
     prompt = inference.build_news_prompt(obs)
     assert not SKU_WITH_NUMBER.search(prompt[prompt.index("Extra days"):])
+
+
+def test_level2_news_uses_generic_product_names():
+    """No drug or brand names: 'amlodipine' for bp_medication made models react to the wrong product."""
+    from news import PRODUCT_NAMES
+
+    assert PRODUCT_NAMES["bp_medication"] == "blood-pressure medication"
+    assert all("(" not in name for name in PRODUCT_NAMES.values())
+    messages = [e.message.lower() for t in TASKS for s in TEST_SEEDS[:20] for scenario in ("fixed", "random")
+                for e in get_task_config(t, s, news=2, scenario=scenario).news]
+    assert messages and not any(w in m for m in messages for w in ("amlodipine", "hcq", "supplements"))
+    # Every product a level-2 item mentions is named exactly as in PRODUCT_NAMES.
+    for t in TASKS:
+        for e in get_task_config(t, TEST_SEEDS[0], news=2, scenario="random").news:
+            assert PRODUCT_NAMES[e.sku_id] in e.message.lower()

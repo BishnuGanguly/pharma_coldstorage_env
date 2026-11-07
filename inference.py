@@ -536,9 +536,9 @@ NEWS_SYSTEM_PROMPT = textwrap.dedent("""
     PRODUCTS (use these exact names in your answer)
       insulin             - insulin, kept in cold storage
       paracetamol         - paracetamol, fever and pain relief
-      bp_medication       - amlodipine, blood-pressure medication
-      vitamins            - vitamin supplements
-      hydroxychloroquine  - hydroxychloroquine (HCQ)
+      bp_medication       - blood-pressure medication
+      vitamins            - vitamins
+      hydroxychloroquine  - hydroxychloroquine
 
     GUIDELINES
     1. Supplier delay, deliveries about X times slower: extra days = about (X - 1) x avg_lead_time.
@@ -560,6 +560,8 @@ NEWS_SYSTEM_PROMPT = textwrap.dedent("""
 
 # Names a model may use for a product instead of its sku_id.
 SKU_ALIASES = {
+    "blood-pressure medication": "bp_medication",
+    "blood pressure medication": "bp_medication",
     "amlodipine": "bp_medication",
     "hcq": "hydroxychloroquine",
     "vitamin": "vitamins",

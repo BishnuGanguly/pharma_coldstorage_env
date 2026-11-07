@@ -33,13 +33,15 @@ SURGE_THRESHOLD = 1.5
 # A lead-time curve above this counts as a supplier delay.
 DELAY_THRESHOLD = 1.0001
 
-# How each SKU is named in level-2 news: the drug, as a news story would put it.
+# How each SKU is named in level-2 news: a plain generic name that matches its sku_id.
+# Brand or drug names (e.g. amlodipine for bp_medication) would add a translation task
+# unrelated to stock planning, and a model that misses it reacts to the wrong product.
 PRODUCT_NAMES: Dict[str, str] = {
     "insulin": "insulin",
     "paracetamol": "paracetamol",
-    "bp_medication": "amlodipine (blood-pressure medication)",
-    "vitamins": "vitamin supplements",
-    "hydroxychloroquine": "hydroxychloroquine (HCQ)",
+    "bp_medication": "blood-pressure medication",
+    "vitamins": "vitamins",
+    "hydroxychloroquine": "hydroxychloroquine",
 }
 
 DELAY_CAUSES: Tuple[str, ...] = (
