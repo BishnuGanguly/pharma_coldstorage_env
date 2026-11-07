@@ -159,6 +159,26 @@ the target to aim for. Replies on days without news are logged as
 | `--base-url` | `http://localhost:11434/v1` | Any OpenAI-compatible server |
 | `--server-model` | `pharma-<model>` | Exact model name on the server, e.g. for a non-Ollama server |
 
+## Before GRPO: the diversity check
+
+GRPO learns only from differences between the answers to the same prompt: if the model
+gives the same answer 8 times, or its answers all score the same, there is nothing to
+learn. `diversity_check.py` tests that on your own machine before you spend GPU time:
+
+```bash
+uv run python local_llm/diversity_check.py                          # Phi-4-mini, 3 days x 8 answers = 24 calls
+uv run python local_llm/diversity_check.py --temperatures 0.7,1.0,1.2
+```
+
+It picks 3 days where the answer matters (one per task, train seeds, random scenario,
+level-2 news), asks the model 8 times per day at the given temperature, and scores every
+answer with the GRPO reward (`training/grpo_reward.py`, see `training/REWARD.md`). For each
+day it prints the news, what fixed answers (+0, +2, +4, +7, +10 days for the SKUs in the
+news) would score, the model's answers with their rewards, and how many were different. It
+ends with a verdict: enough variety for GRPO, too little (try a higher temperature or more
+samples per prompt), or the same answer every time (try a higher temperature, or a short
+supervised fine-tune first). Results go to `results/diversity_<model>.json`.
+
 ## Troubleshooting
 
 | Message | Fix |
