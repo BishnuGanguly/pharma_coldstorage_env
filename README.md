@@ -354,15 +354,21 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 
 **To run it on Kaggle:**
 1. Create a new notebook and import this `.ipynb` (File → Import Notebook).
-2. Turn on GPU T4 ×1 and Internet.
+2. Turn on **GPU T4 ×2** and Internet.
 3. Choose *Save Version → Save & Run All*.
 
-It takes about 6–8 h with the default config. For a quick first run, lower `TRAIN_STEPS` and `EVAL_SEEDS` in the config cell.
+With two GPUs, training runs on GPU 0, and all evaluation runs on GPU 1 in a background process (`training/eval_worker.py`):
+- the untrained model's probe exams and episodes;
+- a probe exam on every checkpoint;
+- half of the after-training episodes.
+
+On one GPU, everything runs in the notebook. Training stops early by itself if the evaluation after it would not fit in Kaggle's 12 h (`SESSION_HOURS`).
 
 The notebook's GPU-free helpers are tested in `tests/test_training_helpers.py`:
 - `training/probe.py`: the probe exam;
 - `training/episodes.py`: batched full episodes with a local model;
-- `training/monitor.py`: the training-health numbers.
+- `training/monitor.py`: the training-health numbers;
+- `training/eval_worker.py`: the GPU 1 evaluation worker (tested in `tests/test_eval_worker.py`).
 
 ## Setup
 
