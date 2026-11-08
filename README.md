@@ -15,6 +15,9 @@ tags:
 
 An OpenEnv-compliant benchmark where an LLM agent manages a pharmaceutical warehouse over a 60-day episode. Every day the agent reads an inventory report and decides what to order and how much. Demand is stochastic, lead times are uncertain, and disruptions hit without warning. The agent must act under uncertainty with no visibility into the underlying processes driving the environment.
 
+
+**The whole story of the project** (purpose, data, evaluation, reward, tools, what went wrong, how it evolved): [`docs/PROJECT_JOURNEY.md`](docs/PROJECT_JOURNEY.md).
+
 ---
 
 ## The Problem
