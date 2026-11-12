@@ -35,10 +35,12 @@ Demand events on the same product multiply together, so two waves make two peaks
 
 Storage
 -------
-Each pool holds `capacity_days` days of the combined base demand of the products
-stored in it, so capacity follows the demand drawn for the episode. For now the
-simulator has one cold-chain pool and one ambient pool: a world may declare at most
-one pool of each kind (any names). Any number of pools is planned.
+Any number of pools, with any names. Each holds `capacity_days` days of the combined
+base demand of the products stored in it, so capacity follows the demand drawn for
+the episode; a pool no product uses keeps a token capacity of 1 unit. Deliveries that
+do not fit in their pool are wasted, pool by pool. `cold_chain: true` marks
+refrigerated pools. With exactly one cold-chain pool and one other pool (like pharma)
+the LLM report keeps the original cold/ambient layout; otherwise it lists every pool.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Tuple
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from models import EpisodeConfig, SKUEpisodeConfig
+from models import EpisodeConfig, SKUEpisodeConfig, StoragePoolConfig
 
 WORLDS_DIR = Path(__file__).resolve().parent / "worlds"
 DEFAULT_WORLD = "pharma"
@@ -220,11 +222,6 @@ class World(_Strict):
             if product.storage not in self.storage:
                 raise ValueError(f"product '{name}' uses storage '{product.storage}', "
                                  f"which is not defined (storage pools: {sorted(self.storage)})")
-        cold = [n for n, p in self.storage.items() if p.cold_chain]
-        ambient = [n for n, p in self.storage.items() if not p.cold_chain]
-        if len(cold) > 1 or len(ambient) > 1:
-            raise ValueError("this version supports one cold-chain pool and one ambient pool "
-                             f"(cold-chain: {cold}, ambient: {ambient}); any number of pools is planned")
         for task_name, task in self.tasks.items():
             for i, event in enumerate(task.events):
                 where = f"task '{task_name}', event {i + 1} ({event.type})"
@@ -377,24 +374,24 @@ def build_episode(world: World, task_name: str, seed: Optional[int] = None) -> E
             lead_time_curve=lead.get(sku_id) or [1.0] * days,
             lead_time_std=world.noise.lead_time_std,
             cold_storage_required=world.storage[product.storage].cold_chain,
+            storage_pool=product.storage,
             stockout_penalty=product.stockout_penalty,
             waste_penalty=product.waste_penalty,
         )
         initial_inventory[sku_id] = draw(rng, product.starting_inventory)
 
-    # 3. Storage: each pool holds capacity_days of its products' base demand. The
-    #    simulator has one cold and one ambient pool; a kind with no pool (or no
-    #    products) keeps a token 1 unit, as EpisodeConfig needs positive capacities.
-    capacity = {True: 1.0, False: 1.0}
+    # 3. Storage: each pool holds capacity_days of its products' base demand; a pool
+    #    with no products keeps a token 1 unit, as capacities must be positive.
+    storage_pools: Dict[str, StoragePoolConfig] = {}
     for pool_name, pool in world.storage.items():
         pool_demand = sum(skus[s].base_demand for s, p in world.products.items() if p.storage == pool_name)
-        capacity[pool.cold_chain] = max(pool.capacity_days * pool_demand, 1.0)
+        storage_pools[pool_name] = StoragePoolConfig(capacity=max(pool.capacity_days * pool_demand, 1.0),
+                                                     cold_chain=pool.cold_chain)
 
     return EpisodeConfig(
         task_name=task_name,
         no_of_days=days,
         skus=skus,
         initial_inventory=initial_inventory,
-        cold_storage_total_capacity=capacity[True],
-        ambient_storage_total_capacity=capacity[False],
+        storage_pools=storage_pools,
     )

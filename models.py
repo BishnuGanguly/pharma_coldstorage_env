@@ -7,6 +7,36 @@ from openenv.core.env_server.types import Action, Observation
 
 
 # ---------------------------------------------------------------------------
+# Storage pools
+# ---------------------------------------------------------------------------
+
+def is_classic_storage(cold_chain_by_pool: Dict[str, bool]) -> bool:
+    """True for exactly one cold-chain pool and one other pool: the original layout."""
+    kinds = list(cold_chain_by_pool.values())
+    return len(kinds) == 2 and kinds.count(True) == 1
+
+
+class StoragePoolConfig(BaseModel):
+    """One storage pool of an episode: its capacity in units and whether it is cold-chain."""
+
+    capacity: float = Field(gt=0.0, description="Units the pool holds, all its SKUs together.")
+    cold_chain: bool = Field(default=False, description="True for refrigerated (cold-chain) storage.")
+
+
+class StoragePoolState(BaseModel):
+    """One storage pool as the agent sees it."""
+
+    total_capacity: float = Field(gt=0.0, description="Units the pool holds. Fixed for the episode.")
+    current_capacity: float = Field(default=0.0, ge=0.0, description="Units it holds now, all its SKUs together.")
+    cold_chain: bool = Field(default=False, description="True for refrigerated (cold-chain) storage.")
+
+    @property
+    def ratio(self) -> float:
+        """Share of the pool in use, 0 to 1."""
+        return self.current_capacity / self.total_capacity
+
+
+# ---------------------------------------------------------------------------
 # SKUState
 # ---------------------------------------------------------------------------
 
@@ -78,9 +108,14 @@ class SKUState(BaseModel):
     cold_storage_required: bool = Field(
         default=False,
         description=(
-            "True if this SKU requires refrigerated cold storage. "
-            "Determines which capacity pool (cold vs ambient) is consumed."
+            "True if this SKU requires refrigerated cold storage, i.e. its storage pool "
+            "is a cold-chain pool."
         ),
+    )
+
+    storage_pool: str = Field(
+        default="",
+        description="Name of the storage pool this SKU is kept in (a key of InventoryState.storage).",
     )
 
     inventory_on_hand: float = Field(
@@ -148,26 +183,36 @@ class InventoryState(Observation):
 
     # -- Storage pools -------------------------------------------------------
 
+    storage: Dict[str, StoragePoolState] = Field(
+        default_factory=dict,
+        description=(
+            "Every storage pool by name: its capacity, the units it holds now and whether it is "
+            "cold-chain. Each SKU is kept in one pool (SKUState.storage_pool)."
+        ),
+    )
+
+    # Totals over all cold-chain pools and over all other pools. With one pool of each
+    # kind (the pharma world) these are exactly the two pools.
     cold_storage_total_capacity: float = Field(
         gt=0.0,
-        description="Maximum units of cold storage available. Fixed for the episode.",
+        description="Units of cold-chain storage available, all cold-chain pools together. Fixed for the episode.",
     )
 
     cold_storage_current_capacity: float = Field(
         default=0.0,
         ge=0.0,
-        description="Cold storage units currently occupied across all cold-chain SKUs.",
+        description="Cold-chain storage units currently occupied, all cold-chain pools together.",
     )
 
     ambient_storage_total_capacity: float = Field(
         gt=0.0,
-        description="Maximum units of ambient storage available. Fixed for the episode.",
+        description="Units of other (ambient) storage available, all such pools together. Fixed for the episode.",
     )
 
     ambient_storage_current_capacity: float = Field(
         default=0.0,
         ge=0.0,
-        description="Ambient storage units currently occupied across all non-cold-chain SKUs.",
+        description="Ambient storage units currently occupied, all ambient pools together.",
     )
 
     # -- Inbound orders ------------------------------------------------------
@@ -273,6 +318,10 @@ class InventoryState(Observation):
     def ambient_storage_ratio(self) -> float:
         return self.ambient_storage_current_capacity / self.ambient_storage_total_capacity
 
+    def has_classic_storage(self) -> bool:
+        """True for one cold-chain pool and one ambient pool (the original two-pool layout)."""
+        return is_classic_storage({name: pool.cold_chain for name, pool in self.storage.items()})
+
 
 # ---------------------------------------------------------------------------
 # SKUEpisodeConfig
@@ -349,7 +398,16 @@ class SKUEpisodeConfig(BaseModel):
         default=False,
         description=(
             "True if this SKU requires refrigerated cold storage. "
-            "Copied into SKUState at episode initialisation."
+            "Copied into SKUState at episode initialisation. When storage_pool is set, "
+            "EpisodeConfig sets this from the pool's cold_chain."
+        ),
+    )
+
+    storage_pool: str = Field(
+        default="",
+        description=(
+            "Name of the storage pool (a key of EpisodeConfig.storage_pools) the SKU is kept in. "
+            "Empty: EpisodeConfig picks the only pool of the SKU's kind (cold-chain or not)."
         ),
     )
  
@@ -446,14 +504,31 @@ class EpisodeConfig(BaseModel):
         description="Episode length shared across all SKUs.",
     )
 
-    cold_storage_total_capacity: float = Field(
-        gt=0.0,
-        description="Total cold storage capacity for the episode.",
+    storage_pools: Dict[str, StoragePoolConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Storage pools by name, in the order deliveries are allocated. Empty: built from "
+            "cold_storage_total_capacity and ambient_storage_total_capacity as two pools, "
+            "'cold' (cold-chain) and 'ambient'."
+        ),
     )
 
-    ambient_storage_total_capacity: float = Field(
+    cold_storage_total_capacity: Optional[float] = Field(
+        default=None,
         gt=0.0,
-        description="Total ambient storage capacity for the episode.",
+        description=(
+            "Total cold-chain capacity. Only read when storage_pools is empty (the original "
+            "two-pool form); otherwise set to the sum over cold-chain pools (1 if there are none)."
+        ),
+    )
+
+    ambient_storage_total_capacity: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Total ambient capacity. Only read when storage_pools is empty (the original "
+            "two-pool form); otherwise set to the sum over the other pools (1 if there are none)."
+        ),
     )
 
     skus: Dict[str, SKUEpisodeConfig] = Field(
@@ -481,6 +556,45 @@ class EpisodeConfig(BaseModel):
                 raise ValueError(
                     f"SKU '{sku_id}' no_of_days={cfg.no_of_days} != episode no_of_days={self.no_of_days}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def resolve_storage(self) -> EpisodeConfig:
+        """
+        Make storage_pools, each SKU's storage_pool and the two capacity totals agree:
+        - no storage_pools: the original form, two pools 'cold' and 'ambient' with the
+          given capacities;
+        - a SKU with no storage_pool goes to the only pool of its kind (cold-chain or not);
+        - a SKU's cold_storage_required follows its pool;
+        - the totals are the sums over cold-chain and other pools (1 for a kind with no
+          pool, as a capacity must be positive).
+        """
+        if not self.storage_pools:
+            if self.cold_storage_total_capacity is None or self.ambient_storage_total_capacity is None:
+                raise ValueError("give storage_pools, or both cold_storage_total_capacity and "
+                                 "ambient_storage_total_capacity")
+            self.storage_pools = {
+                "cold": StoragePoolConfig(capacity=self.cold_storage_total_capacity, cold_chain=True),
+                "ambient": StoragePoolConfig(capacity=self.ambient_storage_total_capacity, cold_chain=False),
+            }
+        for sku_id, sku in self.skus.items():
+            if not sku.storage_pool:
+                kind = [n for n, p in self.storage_pools.items() if p.cold_chain == sku.cold_storage_required]
+                if len(kind) != 1:
+                    raise ValueError(
+                        f"SKU '{sku_id}' has no storage_pool and there is not exactly one "
+                        f"{'cold-chain' if sku.cold_storage_required else 'ambient'} pool to put it in "
+                        f"(pools: {sorted(self.storage_pools)})")
+                sku.storage_pool = kind[0]
+            pool = self.storage_pools.get(sku.storage_pool)
+            if pool is None:
+                raise ValueError(f"SKU '{sku_id}' uses storage pool '{sku.storage_pool}', which is not "
+                                 f"defined (pools: {sorted(self.storage_pools)})")
+            sku.cold_storage_required = pool.cold_chain
+        cold = [p.capacity for p in self.storage_pools.values() if p.cold_chain]
+        other = [p.capacity for p in self.storage_pools.values() if not p.cold_chain]
+        self.cold_storage_total_capacity = sum(cold) if cold else 1.0
+        self.ambient_storage_total_capacity = sum(other) if other else 1.0
         return self
 
 

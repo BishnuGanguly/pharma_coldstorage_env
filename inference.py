@@ -307,6 +307,43 @@ def storage_days(obs: InventoryState, cold: bool) -> Optional[float]:
     return round(total / demand, 1) if demand > 0 else None
 
 
+def pool_days(obs: InventoryState, pool_name: str) -> Optional[float]:
+    """storage_days() for one named pool: its capacity / recent demand of the SKUs in it."""
+    demand = sum(max(s.avg_demand_last_5_days, s.avg_demand_per_day)
+                 for s in obs.skus.values() if s.storage_pool == pool_name)
+    return round(obs.storage[pool_name].total_capacity / demand, 1) if demand > 0 else None
+
+
+def storage_report(obs: InventoryState) -> Dict[str, Any]:
+    """
+    The report's storage section. One cold-chain pool and one other pool (the pharma
+    world, and anything built from cold/ambient capacities) keep the original flat
+    cold_*/ambient_* keys, so prompts and trained models stay valid; any other layout
+    lists every pool by name.
+    """
+    if not obs.storage or obs.has_classic_storage():
+        return {
+            "cold_total":    round(obs.cold_storage_total_capacity, 1),
+            "cold_used":     round(obs.cold_storage_current_capacity, 1),
+            "cold_ratio":    round(obs.cold_storage_ratio, 3),
+            "ambient_total": round(obs.ambient_storage_total_capacity, 1),
+            "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
+            "ambient_ratio": round(obs.ambient_storage_ratio, 3),
+            "cold_days":     storage_days(obs, cold=True),
+            "ambient_days":  storage_days(obs, cold=False),
+        }
+    return {
+        name: {
+            "total":      round(pool.total_capacity, 1),
+            "used":       round(pool.current_capacity, 1),
+            "ratio":      round(pool.ratio, 3),
+            "days":       pool_days(obs, name),
+            "cold_chain": pool.cold_chain,
+        }
+        for name, pool in obs.storage.items()
+    }
+
+
 def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict[str, Any]:
     """
     Convert InventoryState to a clean dict for the LLM prompt.
@@ -320,16 +357,7 @@ def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict
     inbound = inbound_units_by_sku(obs)
     report: Dict[str, Any] = {
         "day":  obs.current_date,
-        "storage": {
-            "cold_total":    round(obs.cold_storage_total_capacity, 1),
-            "cold_used":     round(obs.cold_storage_current_capacity, 1),
-            "cold_ratio":    round(obs.cold_storage_ratio, 3),
-            "ambient_total": round(obs.ambient_storage_total_capacity, 1),
-            "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
-            "ambient_ratio": round(obs.ambient_storage_ratio, 3),
-            "cold_days":     storage_days(obs, cold=True),
-            "ambient_days":  storage_days(obs, cold=False),
-        },
+        "storage": storage_report(obs),
         "expected_inbound_orders": obs.expected_inbound_orders,
         "inventory": {
             sku_id: {
@@ -351,6 +379,10 @@ def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict
             for sku_id, sku in obs.skus.items()
         },
     }
+    if obs.storage and not obs.has_classic_storage():
+        # Pools are listed by name: say which one each SKU uses.
+        for sku_id, sku in report["inventory"].items():
+            sku["storage_pool"] = obs.skus[sku_id].storage_pool
     if not include_cover:
         for sku in report["inventory"].values():
             del sku["days_of_cover"]

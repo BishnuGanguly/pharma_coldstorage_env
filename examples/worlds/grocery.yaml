@@ -5,17 +5,22 @@
 
 name: grocery
 description: >
-  A grocery store with a fridge for dairy and a dry shelf for everything else,
-  through a holiday promotion and a delivery strike.
+  A grocery store with a fridge for dairy, a freezer for ice cream and a dry shelf
+  for everything else, through a holiday promotion and a delivery strike.
 days: 45
 
 noise:
   demand_cv: 0.15
   lead_time_std: 0.5
 
+# Any number of pools. A delivery that does not fit in its own pool is wasted, even
+# if another pool has room.
 storage:
   fridge:
     capacity_days: 10      # small: dairy must be reordered often
+    cold_chain: true
+  freezer:
+    capacity_days: 14
     cold_chain: true
   shelf:
     capacity_days: 21
@@ -35,6 +40,13 @@ products:
     starting_inventory: [40, 80]
     stockout_penalty: 20
     waste_penalty: 5
+  ice_cream:
+    storage: freezer
+    base_demand: [15, 25]
+    base_lead_time: [2, 4]
+    starting_inventory: [30, 60]
+    stockout_penalty: 15
+    waste_penalty: 6
   rice:
     storage: shelf
     base_demand: [30, 50]
@@ -58,10 +70,11 @@ tasks:
   holiday_rush:
     description: >
       A holiday promotion doubles biscuit sales on days 20-27, and demand for milk
-      rises in a wave around the holiday.
+      and ice cream rises in a wave around the holiday.
     events:
-      - {type: demand_step, product: biscuits, start_day: 20, end_day: 27, multiplier: [1.8, 2.2]}
-      - {type: demand_wave, product: milk,     peak_day: 24,  amplitude: [0.5, 1.0], width: 4}
+      - {type: demand_step, product: biscuits,  start_day: 20, end_day: 27, multiplier: [1.8, 2.2]}
+      - {type: demand_wave, product: milk,      peak_day: 24,  amplitude: [0.5, 1.0], width: 4}
+      - {type: demand_wave, product: ice_cream, peak_day: 26,  amplitude: [1.0, 2.0], width: 5}
 
   delivery_strike:
     description: A delivery strike slows every rice and milk order placed on days 15-24.

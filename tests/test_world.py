@@ -67,7 +67,7 @@ def test_grocery_example_builds_every_task():
     assert world.name == "grocery" and world.task_names == ["normal_weeks", "holiday_rush", "delivery_strike"]
     for task in world.task_names:
         config = build_episode(world, task, 7)
-        assert config.no_of_days == 45 and sorted(config.skus) == ["biscuits", "milk", "rice", "yogurt"]
+        assert config.no_of_days == 45 and sorted(config.skus) == ["biscuits", "ice_cream", "milk", "rice", "yogurt"]
         assert config == build_episode(world, task, 7)           # same seed, same episode
         assert config != build_episode(world, task, 8)
 
@@ -76,15 +76,25 @@ def test_storage_capacity_follows_the_pools():
     world = load_world(GROCERY)
     config = build_episode(world, "normal_weeks", 0)
     fridge = 10 * sum(config.skus[s].base_demand for s in ("milk", "yogurt"))
+    freezer = 14 * config.skus["ice_cream"].base_demand
     shelf = 21 * sum(config.skus[s].base_demand for s in ("rice", "biscuits"))
-    assert config.cold_storage_total_capacity == pytest.approx(fridge)
+    pools = config.storage_pools
+    assert list(pools) == ["fridge", "freezer", "shelf"]
+    assert pools["fridge"].capacity == pytest.approx(fridge) and pools["fridge"].cold_chain
+    assert pools["freezer"].capacity == pytest.approx(freezer) and pools["freezer"].cold_chain
+    assert pools["shelf"].capacity == pytest.approx(shelf) and not pools["shelf"].cold_chain
+    # The cold/ambient totals add up the pools of each kind.
+    assert config.cold_storage_total_capacity == pytest.approx(fridge + freezer)
     assert config.ambient_storage_total_capacity == pytest.approx(shelf)
-    assert config.skus["milk"].cold_storage_required and not config.skus["rice"].cold_storage_required
-    # A world with no cold-chain pool keeps a token cold capacity of 1 unit.
-    no_fridge = with_change(grocery_data(), "storage", {"shelf": {"capacity_days": 21}})
-    for name in ("milk", "yogurt"):
-        no_fridge["products"][name]["storage"] = "shelf"
-    assert build_episode(load_world(no_fridge), "normal_weeks", 0).cold_storage_total_capacity == 1.0
+    assert {k: s.storage_pool for k, s in config.skus.items()} == {
+        "milk": "fridge", "yogurt": "fridge", "ice_cream": "freezer", "rice": "shelf", "biscuits": "shelf"}
+    assert config.skus["ice_cream"].cold_storage_required and not config.skus["rice"].cold_storage_required
+    # A world with no cold-chain pool keeps a token cold total of 1 unit, and an unused pool 1 unit.
+    no_cold = with_change(grocery_data(), "storage", {"shelf": {"capacity_days": 21}, "spare": {"capacity_days": 5}})
+    for name in ("milk", "yogurt", "ice_cream"):
+        no_cold["products"][name]["storage"] = "shelf"
+    built = build_episode(load_world(no_cold), "normal_weeks", 0)
+    assert built.cold_storage_total_capacity == 1.0 and built.storage_pools["spare"].capacity == 1.0
 
 
 def test_events_shape_the_curves():
@@ -120,10 +130,11 @@ def test_ranges_are_drawn_in_the_documented_order():
     rush = build_episode(world, "holiday_rush", 11)
     from random import Random
     rng = Random(11)
-    step, amplitude = rng.uniform(1.8, 2.2), rng.uniform(0.5, 1.0)
+    step, milk_wave, ice_cream_wave = rng.uniform(1.8, 2.2), rng.uniform(0.5, 1.0), rng.uniform(1.0, 2.0)
     milk_demand = rng.uniform(80, 120)
     assert rush.skus["biscuits"].demand_curve[20] == step
-    assert rush.skus["milk"].demand_curve[24] == pytest.approx(1 + amplitude)
+    assert rush.skus["milk"].demand_curve[24] == pytest.approx(1 + milk_wave)
+    assert rush.skus["ice_cream"].demand_curve[26] == pytest.approx(1 + ice_cream_wave)
     assert rush.skus["milk"].base_demand == milk_demand
 
 
@@ -138,7 +149,7 @@ def test_fixed_numbers_draw_nothing():
 
 def test_news_works_for_any_world():
     config = get_task_config("holiday_rush", 2, news=1, world=load_world(GROCERY))
-    assert {e.sku_id for e in config.news} == {"biscuits", "milk"}
+    assert {e.sku_id for e in config.news} == {"biscuits", "milk", "ice_cream"}
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +162,6 @@ def test_news_works_for_any_world():
     ("products.milk.base_lead_time", [1, 2, 3], "[low, high]"),
     ("products.milk.stokout_penalty", 5, "milk.stokout_penalty"),
     ("products.milk.storage", "cellar", "storage 'cellar', which is not defined"),
-    ("storage.freezer", {"capacity_days": 5, "cold_chain": True}, "one cold-chain pool"),
     ("days", 0, "days"),
     ("tasks.normal_weeks.events", [{"type": "supplier_delay", "product": "bread", "start_day": 1,
                                     "end_day": 2, "multiplier": 2}], "unknown product 'bread'"),
@@ -217,7 +227,7 @@ def test_environment_reset_accepts_worlds_but_not_file_paths():
     env = PharmaEnvironment()
     world = load_world(GROCERY)
     obs = env.reset(world=world, task_name="delivery_strike", seed=1)
-    assert sorted(obs.skus) == ["biscuits", "milk", "rice", "yogurt"] and obs.current_date == 0
+    assert sorted(obs.skus) == ["biscuits", "ice_cream", "milk", "rice", "yogurt"] and obs.current_date == 0
     env.reset(world=grocery_data(), seed=1)
     assert env._episode_config.task_name == "normal_weeks"          # no task: the first one
     env.reset(world="pharma", task_name="flu_season", seed=5)

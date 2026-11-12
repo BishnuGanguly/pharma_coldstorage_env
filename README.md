@@ -42,7 +42,9 @@ The hard parts are:
 | Cold storage | 21 days of insulin demand (about 170–250 units) | Insulin |
 | Ambient storage | 21 days of the other four SKUs' combined demand (about 6,300–8,600 units) | Paracetamol, BP medication, vitamins, HCQ |
 
-Each pool's capacity is 21 times the summed base demand of the SKUs stored in it, so it scales with the demand drawn for each episode. That is about 25% more than the most a perfect-foresight plan ever needs on any task, so good play always fits, while over-ordering overflows and the excess is wasted (see Scoring). `AMBIENT_STORAGE_DAYS` and `COLD_STORAGE_DAYS` in `tasks.py` set the sizes.
+Each pool's capacity is 21 times the summed base demand of the SKUs stored in it, so it scales with the demand drawn for each episode. That is about 25% more than the most a perfect-foresight plan ever needs on any task, so good play always fits, while over-ordering overflows and the excess is wasted (see Scoring). The sizes are set in [`worlds/pharma.yaml`](worlds/pharma.yaml) (`capacity_days`).
+
+These are the pharma world's two pools; a world file can declare any number, with any names (see "Your own inventory" below). The observation lists every pool in `storage` (`total_capacity`, `current_capacity`, `cold_chain`), and each SKU names its pool in `storage_pool`. The `cold_storage_*` and `ambient_storage_*` fields are the totals over cold-chain pools and over the other pools, which for pharma are exactly the two pools.
 
 ### SKUs
 
@@ -210,9 +212,10 @@ A world file has four parts (the complete reference is at the top of [`world.py`
 ```yaml
 name: my_store
 days: 45
-storage:                                  # one cold-chain pool and one ambient pool, any names
-  fridge: {capacity_days: 10, cold_chain: true}
-  shelf:  {capacity_days: 21}
+storage:                                  # any number of pools, any names
+  fridge:  {capacity_days: 10, cold_chain: true}
+  freezer: {capacity_days: 14, cold_chain: true}
+  shelf:   {capacity_days: 21}
 products:                                 # any number, any names
   milk: {storage: fridge, base_demand: [80, 120], base_lead_time: [1, 2],
          starting_inventory: [100, 200], stockout_penalty: 50, waste_penalty: 8}
@@ -227,9 +230,10 @@ tasks:                                    # the same products under different ev
 - **Amounts** are a number or a `[low, high]` range drawn once per episode from the seed, so a seed always gives the same episode and thousands of seeds give thousands of variations.
 - **Events:** `supplier_delay` (lead time × multiplier for orders placed in a window), `demand_wave` (a bell-shaped rise around a peak day) and `demand_step` (demand × multiplier in a window: a promotion, or a closure below 1). News announces them like the built-in tasks' events.
 - **Mistakes are reported with where they are**: an unknown product, a range with low > high, a day past the end of the episode, a misspelt key or a key written twice.
+- **Storage pools** each hold `capacity_days` of their products' base demand, and a delivery that does not fit in its own pool is wasted even when another pool has room. With one cold-chain pool and one other pool (like pharma) the LLM report keeps the original `cold_*`/`ambient_*` keys, so existing prompts and trained models are unaffected; any other layout is reported pool by pool, with each SKU's `storage_pool`.
 - The pharma world builds exactly the original tasks (checked config by config, so every published score stands). In code: `world.load_world(path)` and `env.reset(world=..., task_name=..., seed=...)`.
 
-**Not yet (planned):** any number of storage pools (one cold-chain and one ambient for now); `--random-scenarios` for worlds other than pharma; LLM prompts and news wording written from the world (they still speak of a pharmaceutical warehouse, and news names unknown products by their ids); the local LLM runner and dashboard picking a world.
+**Not yet (planned):** `--random-scenarios` for worlds other than pharma; LLM prompts and news wording written from the world (they still speak of a pharmaceutical warehouse, and news names unknown products by their ids); the local LLM runner and dashboard picking a world.
 
 ---
 
