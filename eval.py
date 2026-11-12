@@ -45,7 +45,7 @@ sys.path.insert(0, str(ROOT))
 
 import inference  # noqa: E402
 from agents import (  # noqa: E402
-    Agent, BaselineAgent, LLMAgent, NewsLLMAgent, NewsRuleAgent, NothingAgent, OracleAgent,
+    Agent, BaselineAgent, LLMAgent, NewsLLMAgent, NewsPlanAgent, NewsRuleAgent, NothingAgent, OracleAgent,
 )
 from models import PharmaAction  # noqa: E402
 from server.my_env_environment import PharmaEnvironment  # noqa: E402
@@ -53,7 +53,7 @@ from news import NEWS_LEVELS  # noqa: E402
 from tasks import SEED_SPLITS, compute_final_score  # noqa: E402
 from world import DEFAULT_WORLD, World, WorldError, builtin_worlds, load_world  # noqa: E402
 
-AGENTS = ("nothing", "baseline", "oracle", "llm", "baseline_news", "llm_news")
+AGENTS = ("nothing", "baseline", "oracle", "llm", "baseline_news", "news_plan", "llm_news")
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 # An LLM that fails this many calls in a row from the very first day is
 # misconfigured (bad token, wrong model, server down): stop instead of
@@ -74,6 +74,8 @@ def make_agent(name: str, llm: Optional[Dict[str, str]] = None) -> Agent:
         return OracleAgent()
     if name == "baseline_news":
         return NewsRuleAgent()
+    if name == "news_plan":
+        return NewsPlanAgent()
     if name == "llm_news":
         llm = llm or {}
         return NewsLLMAgent(model=llm["model"], api_key=llm["api_key"], base_url=llm["base_url"],

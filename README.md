@@ -191,11 +191,13 @@ The scenario has its own random generator, so base demand, lead times, starting 
 | Baseline | 0.867 | 0.859 |
 | Calendar per task, day and SKU (no reading) | 0.900 | 0.868 |
 | +3 days on every SKU (no reading) | 0.886 | 0.869 |
-| Perfect news reading | 0.902 | 0.877 |
+| Perfect news reading, extra-days rule (`baseline_news`) | 0.902 | 0.877 |
+| Perfect news reading, inventory plan (`news_plan`) | 0.909 | 0.892 |
 | Oracle | 0.931 | 0.925 |
-| **Perfect news reading minus "+3 days on every SKU"** | +0.017 ± 0.003, but a calendar reproduces it | **+0.008 ± 0.003** |
+| **Extra-days rule minus "+3 days on every SKU"** | +0.017 ± 0.003, but a calendar reproduces it | **+0.008 ± 0.003** |
+| **Inventory plan minus "+3 days on every SKU"** | +0.023 ± 0.004 | **+0.023 ± 0.004** |
 
-In the random scenario the calendar earns 50% of perfect news reading's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. That margin is small: the perfect news reading rule closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit), so a better reading rule, or reinforcement learning on the environment's reward, has more to gain than imitating it. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
+In the random scenario the calendar earns 50% of the extra-days rule's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. With the extra-days rule that margin is small: it closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit). The weakness is the rule, not the news: the inventory plan (`news_plan`, see [News](#news-disruptions-announced-ahead-of-time)) reads the same published events and closes 50% of the gap, three times the margin over the best habit (+0.023 against +0.008), while wasting far fewer units (311 per episode against 1,763). It is the reference to aim for, and the better teacher. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
 
 
 ### Your own inventory: world files
@@ -311,6 +313,22 @@ The observation's `news` list holds every item already published whose event has
 
 Level 2 gives nearly the same scores (0.903 overall, 55% of the gap), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.036 it recovers from the text alone, especially at level 2.
 
+**Reference: an inventory plan from the news (`news_plan`).** `baseline_news` keeps the baseline and adds days to it. `news_plan` (`agents.news_plan_orders`) instead replaces, for every SKU with published news, the two estimates the baseline can only correct after a disruption shows:
+
+- **Lead time.** An order placed during a published delay takes the normal lead time × the delay's multiplier. Stock has to last until the first later order can arrive, so the plan covers the earliest arrival of any order placed from tomorrow on: the normal lead time before a delay, and up to the delay's end or the slow lead time (whichever is sooner) just before and during one.
+- **Demand.** Normal demand is past sales with the published surges divided out, and each coming day is forecast as normal demand × that day's multiple, so the forecast rises ahead of a wave and falls after its peak instead of lagging it.
+
+The target is the forecast demand over that cover period plus 3 safety days, capped at the SKU's share of its storage pool plus what is consumed while the order travels. It uses only the published events' fields and the observation (the normal lead time is the first report's `avg_lead_time`), SKUs without news are ordered exactly as the baseline orders them, and without news the agent *is* the baseline.
+
+| Agent (50 test seeds per task) | Supply Chain | Flu Season | Epidemic Two Waves | Gap to oracle closed |
+|---|:---:|:---:|:---:|:---:|
+| `baseline_news`, news level 1 | 0.898 ± 0.005 | 0.904 ± 0.004 | 0.907 ± 0.004 | 56% |
+| `news_plan`, news level 1 | 0.907 ± 0.003 | 0.911 ± 0.002 | 0.907 ± 0.003 | 64% |
+| `baseline_news`, random scenario, level 2 | 0.892 ± 0.006 | 0.877 ± 0.015 | 0.861 ± 0.019 | 27% |
+| `news_plan`, random scenario, level 2 | 0.906 ± 0.003 | 0.889 ± 0.009 | 0.881 ± 0.011 | 50% |
+
+Seed by seed, `news_plan` beats `baseline_news` by +0.006 ± 0.002 on the fixed tasks and +0.015 ± 0.005 in the random scenario. The difference is largest where storage is tight and the disrupted SKU is not known in advance, which is where a plan that sizes orders to the delay and to the pool matters most.
+
 ## LLM results
 
 Small models run locally with Ollama (`local_llm/run_local_llm.py`, temperature 0.2) on test seeds. Every run below is scored under the **current** reward (fill weighted by `stockout_penalty`): each episode saved the exact order sent every day, and since a seed fixes the world, replaying those orders in the current environment reproduces the run exactly (the same fill rate for every SKU on every day) and gives its score under today's reward. The reference agents are scored on the same seeds. The prompts also changed between runs (each run used the prompt of its answer format at the time); rescoring changes only the reward, not what the model saw.
@@ -352,10 +370,11 @@ LLM agents answer in adjustment days by default; `--action days` or `--action un
 
 **Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command, e.g. `uv run python local_llm/run_local_llm.py --model qwen2.5:3b`, sets up the model with Ollama the first time and runs it against the baseline and oracle on the same seeds.
 
-**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against), `llm` (the same prompt as `inference.py`), and, for news (`--news 1` or `2`), `baseline_news` (perfect news reading, a reference) and `llm_news` (the hybrid: the LLM reads the news, the baseline orders).
+**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against), `llm` (the same prompt as `inference.py`), and, for news (`--news 1` or `2`), `baseline_news` and `news_plan` (perfect news reading with an extra-days rule and with an inventory plan; references) and `llm_news` (the hybrid: the LLM reads the news, the baseline orders).
 
 ```bash
 uv run python eval.py --agent baseline_news --news 2 --split test --episodes 50
+uv run python eval.py --agent news_plan     --news 2 --split test --episodes 50 --random-scenarios
 uv run python eval.py --agent llm_news --news 2 --model qwen2.5:3b --base-url http://localhost:11434/v1 \
                       --split test --episodes 10 --save-steps
 ```
