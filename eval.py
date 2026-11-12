@@ -50,7 +50,8 @@ from agents import (  # noqa: E402
 from models import PharmaAction  # noqa: E402
 from server.my_env_environment import PharmaEnvironment  # noqa: E402
 from news import NEWS_LEVELS  # noqa: E402
-from tasks import SEED_SPLITS, TASK_REGISTRY, compute_final_score  # noqa: E402
+from tasks import SEED_SPLITS, compute_final_score  # noqa: E402
+from world import DEFAULT_WORLD, World, WorldError, builtin_worlds, load_world  # noqa: E402
 
 AGENTS = ("nothing", "baseline", "oracle", "llm", "baseline_news", "llm_news")
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -94,16 +95,18 @@ def run_episode(
     on_day: Optional[Callable[[int, str], None]] = None,
     news: int = 0,
     scenario: str = "fixed",
+    world: Optional[World] = None,
 ) -> Dict[str, Any]:
     """
     Play one full episode and return a JSON-serialisable record of it.
     `on_day(day, reply)`, if given, is called after every simulated day (e.g. to show progress).
     `news` is the news level (0 none, 1 exact, 2 varied; see news.py); `scenario` is
     "fixed" (the original tasks) or "random" (disrupted SKUs and days drawn per seed).
+    `world` is the world the task belongs to (default the built-in pharma world).
     """
     agent = make_agent(agent_name, llm)
     env = PharmaEnvironment()
-    obs = env.reset(task_name=task_name, seed=seed, news=news, scenario=scenario)
+    obs = env.reset(task_name=task_name, seed=seed, news=news, scenario=scenario, world=world)
     agent.start_episode(env)
 
     history: List[Tuple[int, str, str]] = []
@@ -158,6 +161,7 @@ def run_episode(
         "split": split,
         "news": news,
         "scenario": scenario,
+        **({"world": world.name} if world is not None else {}),
         "score": round(compute_final_score(obs, env._episode_config), 6),
         "avg_fill": round(fill_total / days, 6) if days else 0.0,
         "stockout_sku_days": stockout_sku_days,
@@ -186,12 +190,13 @@ def evaluate(
     save_steps: bool = False,
     news: int = 0,
     scenario: str = "fixed",
+    world: Optional[World] = None,
 ) -> List[Dict[str, Any]]:
-    """Run `episodes` seeds (the first N of the split) on each task."""
+    """Run `episodes` seeds (the first N of the split) on each task (of `world`, default pharma)."""
     seeds = list(SEED_SPLITS[split][:episodes])
     jobs = [
         dict(agent_name=agent_name, task_name=t, seed=s, split=split, llm=llm, save_steps=save_steps, news=news,
-             scenario=scenario)
+             scenario=scenario, world=world)
         for t in task_names for s in seeds
     ]
     if workers <= 1:
@@ -300,7 +305,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--agent", choices=AGENTS)
     parser.add_argument("--split", choices=sorted(SEED_SPLITS), default="test")
     parser.add_argument("--episodes", type=int, default=20, help="seeds per task (first N of the split)")
-    parser.add_argument("--tasks", default="all", help="comma-separated task names, or 'all'")
+    parser.add_argument("--world", default=DEFAULT_WORLD,
+                        help=f"built-in world name ({', '.join(builtin_worlds())}) or path of a world file "
+                             "(.yaml/.json) describing your own products, storage and tasks; default pharma")
+    parser.add_argument("--tasks", default="all", help="comma-separated task names of the world, or 'all'")
     parser.add_argument("--workers", type=int, default=None,
                         help="parallel processes (default: CPU count for rule agents, 1 for llm)")
     parser.add_argument("--save-steps", action="store_true", help="also store every day's reply and reward")
@@ -331,10 +339,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not args.agent:
         parser.error("--agent is required unless --compare is used")
 
-    task_names = list(TASK_REGISTRY) if args.tasks == "all" else [t.strip() for t in args.tasks.split(",")]
-    unknown = [t for t in task_names if t not in TASK_REGISTRY]
+    try:
+        world = load_world(args.world)
+    except WorldError as exc:
+        parser.error(str(exc))
+    # Compared by content, not name: an edited copy of pharma.yaml is a world of its own.
+    builtin_default = world == load_world(DEFAULT_WORLD)
+    if args.random_scenarios and not builtin_default:
+        parser.error(f"--random-scenarios is only available for the built-in {DEFAULT_WORLD} world for now")
+    task_names = world.task_names if args.tasks == "all" else [t.strip() for t in args.tasks.split(",")]
+    unknown = [t for t in task_names if t not in world.tasks]
     if unknown:
-        parser.error(f"unknown task(s) {unknown}; choose from {sorted(TASK_REGISTRY)}")
+        parser.error(f"unknown task(s) {unknown} in world '{world.name}'; choose from {sorted(world.tasks)}")
 
     llm = None
     if args.agent in ("llm", "llm_news"):
@@ -346,8 +362,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     scenario = "random" if args.random_scenarios else "fixed"
     records = evaluate(args.agent, task_names, args.split, args.episodes, workers, llm, args.save_steps, args.news,
-                       scenario)
+                       scenario, None if builtin_default else world)
     name = args.agent if not llm else args.agent + "_" + re.sub(r"[^A-Za-z0-9.]+", "-", args.model)
+    if not builtin_default:
+        name = re.sub(r"[^A-Za-z0-9.]+", "-", world.name) + "_" + name
     news = f"_news{args.news}" if args.news else ""
     rs = "_rs" if args.random_scenarios else ""
     out = args.out or ROOT / "results" / f"{name}{news}{rs}_{args.split}_{args.episodes}.jsonl"

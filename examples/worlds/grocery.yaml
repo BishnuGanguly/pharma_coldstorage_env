@@ -1,0 +1,70 @@
+# An example world: a small grocery store. Copy it and change it to describe your own
+# inventory; every field is explained in world.py.
+#
+#   uv run python eval.py --world examples/worlds/grocery.yaml --agent baseline --episodes 20
+
+name: grocery
+description: >
+  A grocery store with a fridge for dairy and a dry shelf for everything else,
+  through a holiday promotion and a delivery strike.
+days: 45
+
+noise:
+  demand_cv: 0.15
+  lead_time_std: 0.5
+
+storage:
+  fridge:
+    capacity_days: 10      # small: dairy must be reordered often
+    cold_chain: true
+  shelf:
+    capacity_days: 21
+
+products:
+  milk:
+    storage: fridge
+    base_demand: [80, 120]
+    base_lead_time: [1, 2]
+    starting_inventory: [100, 200]
+    stockout_penalty: 50
+    waste_penalty: 8
+  yogurt:
+    storage: fridge
+    base_demand: [30, 50]
+    base_lead_time: [1, 3]
+    starting_inventory: [40, 80]
+    stockout_penalty: 20
+    waste_penalty: 5
+  rice:
+    storage: shelf
+    base_demand: [30, 50]
+    base_lead_time: [3, 5]
+    starting_inventory: [100, 200]
+    stockout_penalty: 30
+    waste_penalty: 1
+  biscuits:
+    storage: shelf
+    base_demand: [60, 90]
+    base_lead_time: [2, 4]
+    starting_inventory: [100, 300]
+    stockout_penalty: 10
+    waste_penalty: 1
+
+tasks:
+  normal_weeks:
+    description: "No disruptions: steady demand and reliable suppliers."
+    events: []
+
+  holiday_rush:
+    description: >
+      A holiday promotion doubles biscuit sales on days 20-27, and demand for milk
+      rises in a wave around the holiday.
+    events:
+      - {type: demand_step, product: biscuits, start_day: 20, end_day: 27, multiplier: [1.8, 2.2]}
+      - {type: demand_wave, product: milk,     peak_day: 24,  amplitude: [0.5, 1.0], width: 4}
+
+  delivery_strike:
+    description: A delivery strike slows every rice and milk order placed on days 15-24.
+    events:
+      - {type: supplier_delay, product: rice, start_day: 15, end_day: 24, multiplier: [2, 4]}
+      - {type: supplier_delay, product: milk, start_day: 15, end_day: 24, multiplier: [2, 3]}

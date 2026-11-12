@@ -21,6 +21,8 @@ dependencies = [
     # Live dashboard at /web (server/dashboard.py): charts and the LLM agent
     "plotly>=5.20",
     "openai>=1.0",
+    # World files (world.py, worlds/*.yaml)
+    "pyyaml>=6.0",
     # Environment-specific dependencies
     # Add all dependencies needed for your environment here
     # Examples:
@@ -46,3 +48,7 @@ server = "my_env.server.app:main"
 include-package-data = true
 packages = ["my_env", "my_env.server"]
 package-dir = { "my_env" = ".", "my_env.server" = "server" }
+
+[tool.setuptools.package-data]
+# The built-in world files (world.py loads worlds/<name>.yaml).
+my_env = ["worlds/*.yaml"]

@@ -195,6 +195,42 @@ The scenario has its own random generator, so base demand, lead times, starting 
 
 In the random scenario the calendar earns 50% of perfect news reading's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. That margin is small: the perfect news reading rule closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit), so a better reading rule, or reinforcement learning on the environment's reward, has more to gain than imitating it. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
 
+
+### Your own inventory: world files
+
+The products, storage and tasks above are not hard-coded: they live in a **world file**, [`worlds/pharma.yaml`](worlds/pharma.yaml). Describe your own inventory in the same format and every agent, the news and `eval.py` work on it:
+
+```bash
+uv run python eval.py --world examples/worlds/grocery.yaml --agent baseline --episodes 20
+uv run python eval.py --world examples/worlds/grocery.yaml --agent oracle   --episodes 20 --news 1
+```
+
+A world file has four parts (the complete reference is at the top of [`world.py`](world.py), and [`examples/worlds/grocery.yaml`](examples/worlds/grocery.yaml) is a worked example):
+
+```yaml
+name: my_store
+days: 45
+storage:                                  # one cold-chain pool and one ambient pool, any names
+  fridge: {capacity_days: 10, cold_chain: true}
+  shelf:  {capacity_days: 21}
+products:                                 # any number, any names
+  milk: {storage: fridge, base_demand: [80, 120], base_lead_time: [1, 2],
+         starting_inventory: [100, 200], stockout_penalty: 50, waste_penalty: 8}
+tasks:                                    # the same products under different events
+  holiday_rush:
+    events:
+      - {type: demand_step,    product: milk, start_day: 20, end_day: 27, multiplier: [1.8, 2.2]}
+      - {type: demand_wave,    product: milk, peak_day: 24, amplitude: [0.5, 1.0], width: 4}
+      - {type: supplier_delay, product: milk, start_day: 15, end_day: 24, multiplier: [2, 3]}
+```
+
+- **Amounts** are a number or a `[low, high]` range drawn once per episode from the seed, so a seed always gives the same episode and thousands of seeds give thousands of variations.
+- **Events:** `supplier_delay` (lead time × multiplier for orders placed in a window), `demand_wave` (a bell-shaped rise around a peak day) and `demand_step` (demand × multiplier in a window: a promotion, or a closure below 1). News announces them like the built-in tasks' events.
+- **Mistakes are reported with where they are**: an unknown product, a range with low > high, a day past the end of the episode, a misspelt key or a key written twice.
+- The pharma world builds exactly the original tasks (checked config by config, so every published score stands). In code: `world.load_world(path)` and `env.reset(world=..., task_name=..., seed=...)`.
+
+**Not yet (planned):** any number of storage pools (one cold-chain and one ambient for now); `--random-scenarios` for worlds other than pharma; LLM prompts and news wording written from the world (they still speak of a pharmaceutical warehouse, and news names unknown products by their ids); the local LLM runner and dashboard picking a world.
+
 ---
 
 ## Scoring
@@ -451,7 +487,10 @@ uv run python smoke_test.py --http # also exercises the client (server must be r
 pharma_coldstorage_env/
 ├── models.py          # Pydantic schemas: SKUState, InventoryState,
 │                      # PharmaAction, EpisodeConfig, SKUEpisodeConfig
-├── tasks.py           # Task constructors (demand/lead-time curves)
+├── world.py           # World files: schema, loading, building episodes
+├── worlds/pharma.yaml # The built-in pharma world (products, storage, tasks)
+├── examples/worlds/   # Example world files to copy (grocery.yaml)
+├── tasks.py           # The pharma tasks, random scenarios
 │                      # + compute_step_reward, compute_final_score
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
 ├── agents.py          # Agents: nothing, baseline, oracle, LLM

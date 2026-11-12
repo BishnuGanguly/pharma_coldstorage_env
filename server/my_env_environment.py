@@ -19,6 +19,7 @@ from models import (
 )
 from news import visible_news
 from tasks import compute_step_reward, get_task_config
+from world import World, load_world
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,7 @@ class PharmaEnvironment(Environment):
         task_name: Optional[str] = None,
         news: int = 0,
         scenario: str = "fixed",
+        world: Optional[Union[World, Dict[str, Any], str]] = None,
         **kwargs: Any,
     ) -> InventoryState:
         """
@@ -64,10 +66,16 @@ class PharmaEnvironment(Environment):
 
         The episode is chosen, in order of precedence, from:
           - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
-          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`, the
-                            news level `news` (0 none, 1 exact, 2 varied; see news.py)
-                            and `scenario` ("fixed" tasks or "random" SKUs and days)
+          - task_name:      a task of `world`, built with `seed`, the news level
+                            `news` (0 none, 1 exact, 2 varied; see news.py) and
+                            `scenario` ("fixed" tasks or "random" SKUs and days)
+          - world alone:    the world's first task, built the same way
           - the built-in default config
+
+        world: a World, its dict form (as sent over HTTP/WS) or a built-in world's
+        name; default the built-in pharma world (worlds/pharma.yaml). File paths are
+        not accepted here, since reset() can be called over the network: load a file
+        with world.load_world() and pass the World.
         """
         self._rng = Random(seed)
         self._episode_id = episode_id or str(uuid.uuid4())
@@ -75,8 +83,11 @@ class PharmaEnvironment(Environment):
         self._open_orders = []
         if episode_config is not None:
             self._episode_config = EpisodeConfig.model_validate(episode_config)
-        elif task_name is not None:
-            self._episode_config = get_task_config(task_name, seed, news=news, scenario=scenario)
+        elif task_name is not None or world is not None:
+            world_obj = load_world(world, allow_files=False) if world is not None else None
+            if task_name is None:
+                task_name = world_obj.task_names[0]
+            self._episode_config = get_task_config(task_name, seed, news=news, scenario=scenario, world=world_obj)
         else:
             self._episode_config = self._default_episode_config()
         self._draw_world_noise()
