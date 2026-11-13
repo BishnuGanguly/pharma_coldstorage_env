@@ -172,19 +172,19 @@ class NewsRuleAgent(Agent):
 PLAN_LOOKAHEAD_DAYS = 60
 
 
-def news_plan_orders(
+def news_plan_targets(
     obs: InventoryState,
     events: List[Any],
     normal_lead_time: Dict[str, float],
     safety_days: float = 3.0,
 ) -> Dict[str, float]:
     """
-    Orders from an inventory plan built on the news events published so far
-    (announce_day <= today). It uses the events' fields and the observation only.
+    Target stock position (units on hand plus inbound) for every SKU with a news event
+    published so far (announce_day <= today), from an inventory plan that uses the
+    events' fields and the observation only. SKUs without news are not in the result.
 
-    A SKU with no published event is ordered exactly as baseline_policy orders it. For a
-    SKU with one, the plan replaces the baseline's two estimates, which only react after
-    a disruption shows:
+    The plan replaces the baseline's two estimates, which only react after a disruption
+    shows:
 
     lead time    An order placed on day d takes normal_lead_time x the multiplier of a
                  published supplier_delay covering d (1 outside delays). Stock must last
@@ -205,11 +205,6 @@ def news_plan_orders(
     today = obs.current_date
     published = [e for e in events if e.announce_day <= today and e.sku_id in obs.skus]
     with_news = {e.sku_id for e in published}
-    orders = {k: q for k, q in baseline_policy(obs, safety_days=safety_days).items() if k not in with_news}
-
-    inbound: Dict[str, float] = {}
-    for sku_id, qty, _ in obs.expected_inbound_orders:
-        inbound[sku_id] = inbound.get(sku_id, 0.0) + qty
 
     def multiple(sku_id: str, day: int) -> float:
         """Demand on `day` as a multiple of normal, from the published surges."""
@@ -229,6 +224,7 @@ def news_plan_orders(
 
     normal = {sku_id: normal_demand(sku_id) for sku_id in obs.skus}
 
+    targets: Dict[str, float] = {}
     for sku_id in sorted(with_news, key=list(obs.skus).index):
         sku = obs.skus[sku_id]
         demand = normal[sku_id]
@@ -252,11 +248,60 @@ def news_plan_orders(
             pool_demand = sum(normal[k] for k, s in obs.skus.items() if s.storage_pool == sku.storage_pool)
             in_transit = demand * multiple(sku_id, today) * lead_time(today)
             target = min(target, pool.total_capacity * demand / pool_demand + in_transit)
+        targets[sku_id] = target
+    return targets
 
-        shortfall = target - sku.inventory_on_hand - inbound.get(sku_id, 0.0)
+
+def news_plan_orders(
+    obs: InventoryState,
+    events: List[Any],
+    normal_lead_time: Dict[str, float],
+    safety_days: float = 3.0,
+) -> Dict[str, float]:
+    """
+    Orders of the news plan: each SKU with published news is ordered up to its
+    news_plan_targets() target, and every other SKU exactly as baseline_policy orders it.
+    """
+    targets = news_plan_targets(obs, events, normal_lead_time, safety_days)
+    orders = {k: q for k, q in baseline_policy(obs, safety_days=safety_days).items() if k not in targets}
+    inbound: Dict[str, float] = {}
+    for sku_id, qty, _ in obs.expected_inbound_orders:
+        inbound[sku_id] = inbound.get(sku_id, 0.0) + qty
+    for sku_id, target in targets.items():
+        shortfall = target - obs.skus[sku_id].inventory_on_hand - inbound.get(sku_id, 0.0)
         if shortfall >= 1:
             orders[sku_id] = round(shortfall)
     return orders
+
+
+def news_plan_adjust_days(
+    obs: InventoryState,
+    events: List[Any],
+    normal_lead_time: Dict[str, float],
+    safety_days: float = 3.0,
+) -> Dict[str, int]:
+    """
+    The news plan as an answer in the `adjust` format: for every SKU, the whole number
+    of extra days (within inference.ADJUST_DAYS_RANGE) that brings the baseline's
+    order-up-to level closest to the plan's target. The baseline orders up to
+    recent demand x (lead time + safety_days + extra), so
+
+        extra = target / recent demand - lead time - safety_days
+
+    SKUs without published news, and SKUs with no demand seen yet, get 0. Where the plan
+    wants less than the baseline (demand falling after a peak) the answer is 0, the
+    lowest the format allows.
+    """
+    low, high = inference.ADJUST_DAYS_RANGE
+    answer = {sku_id: 0 for sku_id in obs.skus}
+    for sku_id, target in news_plan_targets(obs, events, normal_lead_time, safety_days).items():
+        sku = obs.skus[sku_id]
+        demand = max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
+        if demand <= 0:
+            continue
+        extra = target / demand - baseline_lead_time(sku) - safety_days
+        answer[sku_id] = int(min(max(round(extra), low), high))
+    return answer
 
 
 class NewsPlanAgent(Agent):
