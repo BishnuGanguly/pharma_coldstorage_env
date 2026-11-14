@@ -37,6 +37,46 @@ class StoragePoolState(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# World context: the words that describe a world, for prompts and news
+# ---------------------------------------------------------------------------
+
+class ProductInfo(BaseModel):
+    """How a product is called and described in prompts and news."""
+
+    name: str = Field(description="The product's name in plain words, e.g. 'fresh milk' for sku 'milk'.")
+    description: str = Field(default="", description="One short line about the product, shown in prompts.")
+    aliases: List[str] = Field(
+        default_factory=list,
+        description="Other names a model may use for the product in its answer.",
+    )
+
+
+class WorldContext(BaseModel):
+    """
+    What the agent may know about the world it works in: whose inventory this is and
+    what the products are. Nothing here is hidden ground truth. Absent (None) for the
+    built-in pharma world, whose prompts keep their original wording.
+    """
+
+    business: str = Field(description="Whose inventory this is, e.g. 'a grocery store'.")
+    products: Dict[str, ProductInfo] = Field(default_factory=dict, description="Per-SKU names, keyed by sku_id.")
+
+
+class NewsWording(BaseModel):
+    """The causes level-2 news gives for a world's disruptions."""
+
+    delay_causes: List[str] = Field(min_length=1, description="Reasons for a supplier delay, e.g. 'a port strike'.")
+    cold_chain_delay_causes: List[str] = Field(
+        default_factory=list,
+        description="Reasons used for SKUs in cold-chain storage instead of delay_causes; empty: use delay_causes.",
+    )
+    surge_causes: Dict[str, str] = Field(
+        default_factory=dict, description="Per-SKU reason for a demand surge, e.g. 'a holiday promotion'.",
+    )
+    default_surge_cause: str = Field(default="a rise in demand", description="Reason for SKUs not in surge_causes.")
+
+
+# ---------------------------------------------------------------------------
 # SKUState
 # ---------------------------------------------------------------------------
 
@@ -290,6 +330,14 @@ class InventoryState(Observation):
             "Announcements the agent can see today: every news item already published whose "
             "event has not ended yet, each starting with the day it was published. "
             "Empty when the episode has no news (news level 0)."
+        ),
+    )
+
+    context: Optional[WorldContext] = Field(
+        default=None,
+        description=(
+            "Whose inventory this is and what the products are called, for prompts. "
+            "None for the built-in pharma world (its prompts keep their original wording)."
         ),
     )
 
@@ -547,6 +595,18 @@ class EpisodeConfig(BaseModel):
             "Disruptions announced to the agent ahead of time (see NewsEvent). "
             "Empty for news level 0, the original environment."
         ),
+    )
+
+    context: Optional[WorldContext] = Field(
+        default=None,
+        description=(
+            "Whose inventory this is and how the products are called, for prompts and news. "
+            "None: the original pharma wording."
+        ),
+    )
+    news_wording: Optional[NewsWording] = Field(
+        default=None,
+        description="Causes named by level-2 news. None: the original pharma wording.",
     )
 
     @model_validator(mode="after")

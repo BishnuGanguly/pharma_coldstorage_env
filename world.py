@@ -33,6 +33,20 @@ Events
                     (a promotion above 1, a closure below 1).
 Demand events on the same product multiply together, so two waves make two peaks.
 
+Words
+-----
+Prompts and level-2 news are written from the world, so an agent reads about your
+business and your products:
+
+    business      whose inventory this is, e.g. "a grocery store" (default "a warehouse")
+    products.<id> name (default: the id with spaces), description, aliases (other names
+                  a model may use for the product in its answer)
+    news          delay_causes, cold_chain_delay_causes (for products in cold-chain
+                  storage), surge_causes per product, default_surge_cause
+
+All are optional. The built-in pharma world is the one exception: it keeps its original
+prompt and news wording, which models trained on it rely on.
+
 Storage
 -------
 Any number of pools, with any names. Each holds `capacity_days` days of the combined
@@ -46,6 +60,7 @@ the LLM report keeps the original cold/ambient layout; otherwise it lists every 
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from math import exp
 from pathlib import Path
 from random import Random
@@ -54,7 +69,8 @@ from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Tuple
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from models import EpisodeConfig, SKUEpisodeConfig, StoragePoolConfig
+from models import EpisodeConfig, NewsWording, ProductInfo, SKUEpisodeConfig, StoragePoolConfig, WorldContext
+from news import COLD_CHAIN_CAUSES, DELAY_CAUSES
 
 WORLDS_DIR = Path(__file__).resolve().parent / "worlds"
 DEFAULT_WORLD = "pharma"
@@ -131,6 +147,12 @@ class Product(_Strict):
     starting_inventory: Any = Field(default=0.0, description="Units on the shelf on day 0.")
     stockout_penalty: float = Field(ge=0.0, description="How much a shortage of this product costs (relative).")
     waste_penalty: float = Field(ge=0.0, description="How much a wasted delivery of this product costs (relative).")
+    name: Optional[str] = Field(
+        default=None, min_length=1,
+        description="The product's name in prompts and news; default: its id with '_' as spaces.",
+    )
+    description: str = Field(default="", description="One short line about the product, shown in prompts.")
+    aliases: List[str] = Field(default_factory=list, description="Other names a model may use for it in answers.")
 
     @field_validator("base_demand", "base_lead_time")
     @classmethod
@@ -207,11 +229,30 @@ class Task(_Strict):
     events: List[Event] = Field(default_factory=list)
 
 
+class NewsText(_Strict):
+    """The causes level-2 news gives for this world's disruptions."""
+
+    delay_causes: List[str] = Field(default_factory=lambda: list(DELAY_CAUSES), min_length=1,
+                                    description="Reasons for a supplier delay, e.g. 'a port strike'.")
+    cold_chain_delay_causes: List[str] = Field(
+        default_factory=lambda: list(COLD_CHAIN_CAUSES),
+        description="Reasons used for products in cold-chain storage; an empty list uses delay_causes.",
+    )
+    surge_causes: Dict[str, str] = Field(
+        default_factory=dict, description="Per product, the reason for a demand surge, e.g. 'a holiday promotion'.",
+    )
+    default_surge_cause: str = Field(default="a rise in demand", min_length=1,
+                                     description="The reason for products not in surge_causes.")
+
+
 class World(_Strict):
     name: str = Field(min_length=1)
     description: str = ""
+    business: str = Field(default="a warehouse", min_length=1,
+                          description="Whose inventory this is, as it reads after 'of', e.g. 'a grocery store'.")
     days: int = Field(gt=0, description="Episode length in days.")
     noise: Noise = Field(default_factory=Noise)
+    news: NewsText = Field(default_factory=NewsText)
     storage: Dict[str, StoragePool] = Field(min_length=1)
     products: Dict[str, Product] = Field(min_length=1)
     tasks: Dict[str, Task] = Field(min_length=1)
@@ -222,6 +263,17 @@ class World(_Strict):
             if product.storage not in self.storage:
                 raise ValueError(f"product '{name}' uses storage '{product.storage}', "
                                  f"which is not defined (storage pools: {sorted(self.storage)})")
+        unknown = sorted(set(self.news.surge_causes) - set(self.products))
+        if unknown:
+            raise ValueError(f"news.surge_causes names unknown product(s) {unknown} "
+                             f"(products: {sorted(self.products)})")
+        # A name or alias must point to one product, or an answer using it would be ambiguous.
+        seen: Dict[str, str] = {}
+        for sku_id, info in self.context().products.items():
+            for label in {sku_id.lower(), info.name.lower(), *(a.lower() for a in info.aliases)}:
+                if seen.setdefault(label, sku_id) != sku_id:
+                    raise ValueError(f"'{label}' names both product '{seen[label]}' and product '{sku_id}' "
+                                     "(ids, names and aliases must be unique)")
         for task_name, task in self.tasks.items():
             for i, event in enumerate(task.events):
                 where = f"task '{task_name}', event {i + 1} ({event.type})"
@@ -237,6 +289,21 @@ class World(_Strict):
     @property
     def task_names(self) -> List[str]:
         return list(self.tasks)
+
+    def context(self) -> WorldContext:
+        """The business and the products' names, for prompts and news."""
+        return WorldContext(
+            business=self.business,
+            products={
+                sku_id: ProductInfo(name=p.name or sku_id.replace("_", " "), description=p.description,
+                                    aliases=list(p.aliases))
+                for sku_id, p in self.products.items()
+            },
+        )
+
+    def news_wording(self) -> NewsWording:
+        """The causes level-2 news names for this world's disruptions."""
+        return NewsWording(**self.news.model_dump())
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +322,12 @@ class _UniqueKeyLoader(yaml.SafeLoader):
                     None, None, f"duplicate key '{key}'", key_node.start_mark)
             seen.add(key)
         return super().construct_mapping(node, deep=deep)
+
+
+@lru_cache(maxsize=1)
+def default_world() -> "World":
+    """The built-in pharma world (worlds/pharma.yaml), loaded once."""
+    return load_world(DEFAULT_WORLD)
 
 
 def builtin_worlds() -> List[str]:
@@ -388,10 +461,16 @@ def build_episode(world: World, task_name: str, seed: Optional[int] = None) -> E
         storage_pools[pool_name] = StoragePoolConfig(capacity=max(pool.capacity_days * pool_demand, 1.0),
                                                      cold_chain=pool.cold_chain)
 
+    # The built-in pharma world keeps the original prompt and news wording (context None),
+    # so its prompts, and models trained on them, stay valid. Every other world, including
+    # an edited copy of pharma.yaml, gets prompts and news written from its own file.
+    own_words = world != default_world()
     return EpisodeConfig(
         task_name=task_name,
         no_of_days=days,
         skus=skus,
         initial_inventory=initial_inventory,
         storage_pools=storage_pools,
+        context=world.context() if own_words else None,
+        news_wording=world.news_wording() if own_words else None,
     )

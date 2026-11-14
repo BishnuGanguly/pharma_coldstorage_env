@@ -11,6 +11,11 @@ name: pharma
 description: >
   A pharmaceutical warehouse with a refrigerated pool for insulin and an ambient pool
   for everything else, facing supplier delays and epidemic demand waves.
+# The built-in pharma world keeps its original prompt and news wording, which trained
+# models rely on. The words below (business, product names, news causes) are what a
+# changed copy of this file starts from: any other world's prompts and news are written
+# from these fields.
+business: a pharmaceutical warehouse
 days: 60
 
 noise:
@@ -31,6 +36,7 @@ storage:
 # weights its share of overflow waste. Only the ratios between products matter.
 products:
   insulin:
+    description: for diabetes, must stay refrigerated
     storage: cold
     base_demand: [8, 12]
     base_lead_time: [4, 6]
@@ -38,6 +44,7 @@ products:
     stockout_penalty: 100
     waste_penalty: 10
   paracetamol:
+    description: fever and pain relief
     storage: ambient
     base_demand: [180, 220]
     base_lead_time: [1, 3]
@@ -45,6 +52,8 @@ products:
     stockout_penalty: 20
     waste_penalty: 1
   bp_medication:
+    name: blood-pressure medication
+    aliases: [blood pressure medication, amlodipine]
     storage: ambient
     base_demand: [40, 60]
     base_lead_time: [2, 4]
@@ -59,12 +68,28 @@ products:
     stockout_penalty: 5
     waste_penalty: 0.5
   hydroxychloroquine:
+    aliases: [hcq]
     storage: ambient
     base_demand: [20, 40]
     base_lead_time: [5, 8]
     starting_inventory: [1, 5]
     stockout_penalty: 35
     waste_penalty: 4
+
+news:
+  delay_causes:
+    - a port strike
+    - a fire at a manufacturing plant
+    - a customs backlog
+    - a shortage of raw materials
+    - a truck drivers' strike
+  cold_chain_delay_causes:
+    - a strike at the cold-chain carrier
+    - a breakdown of refrigerated transport
+  surge_causes:
+    paracetamol: an early flu season
+    hydroxychloroquine: a new epidemic wave
+  default_surge_cause: an outbreak
 
 tasks:
   supply_chain_broken:

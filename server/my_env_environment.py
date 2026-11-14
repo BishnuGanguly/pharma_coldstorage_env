@@ -147,6 +147,7 @@ class PharmaEnvironment(Environment):
             cold_storage_total_capacity=cfg.cold_storage_total_capacity,
             ambient_storage_total_capacity=cfg.ambient_storage_total_capacity,
             skus=skus,
+            context=cfg.context,
             demand_history={sku_id: [] for sku_id in cfg.skus.keys()},
             lead_time_history={sku_id: [] for sku_id in cfg.skus.keys()},
         )
@@ -532,7 +533,7 @@ class PharmaEnvironment(Environment):
             return inference.SYSTEM_PROMPT + "\n\nNo state available. Call reset() first."
         report = inference.observation_to_dict(self._inventory_state)
         user_prompt = inference.build_user_prompt(report, [], step=self._inventory_state.current_date + 1)
-        return inference.SYSTEM_PROMPT + "\n\n" + user_prompt
+        return inference.system_prompt("units", self._inventory_state) + "\n\n" + user_prompt
 
     # -----------------------------------------------------------------------
     # Default episode config

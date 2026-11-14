@@ -359,7 +359,7 @@ class NewsLLMAgent(Agent):
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": inference.NEWS_SYSTEM_PROMPT},
+                    {"role": "system", "content": inference.news_system_prompt(obs)},
                     {"role": "user", "content": inference.build_news_prompt(obs)},
                 ],
                 temperature=inference.TEMPERATURE,
@@ -474,7 +474,7 @@ class LLMAgent(Agent):
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": inference.system_prompt(self.action)},
+                    {"role": "system", "content": inference.system_prompt(self.action, obs)},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=inference.TEMPERATURE,

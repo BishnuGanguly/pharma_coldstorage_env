@@ -97,7 +97,7 @@ def prompt_messages(prompt: DayPrompt) -> List[Dict[str, str]]:
     _, obs, history = build_state(prompt)
     report = inference.observation_to_dict(obs, include_cover=False)
     user = inference.build_user_prompt(report, history, step=obs.current_date + 1, action="adjust")
-    return [{"role": "system", "content": inference.system_prompt("adjust")},
+    return [{"role": "system", "content": inference.system_prompt("adjust", obs)},
             {"role": "user", "content": user}]
 
 

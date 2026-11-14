@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from models import EpisodeConfig, InventoryState, SKUEpisodeConfig
 from news import add_news
-from world import DEFAULT_WORLD, World, WorldError, build_episode, load_world
+from world import World, WorldError, build_episode, default_world, load_world
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def combine_curves(curve_a: List[float], curve_b: List[float]) -> List[float]:
 # every episode built with the same seed is identical. waste_penalty weights each
 # SKU's share of overflow waste in the reward; only ratios matter.
 
-PHARMA_WORLD: World = load_world(DEFAULT_WORLD)
+PHARMA_WORLD: World = default_world()
 
 
 def _as_range(amount: Any) -> Tuple[float, float]:

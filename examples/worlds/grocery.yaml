@@ -7,6 +7,7 @@ name: grocery
 description: >
   A grocery store with a fridge for dairy, a freezer for ice cream and a dry shelf
   for everything else, through a holiday promotion and a delivery strike.
+business: a neighbourhood grocery store   # who the agent works for; used in the prompts
 days: 45
 
 noise:
@@ -27,6 +28,9 @@ storage:
 
 products:
   milk:
+    name: fresh milk                 # how prompts and news call it (default: the id)
+    description: sold daily, spoils fast
+    aliases: [whole milk]            # other names a model may use in its answer
     storage: fridge
     base_demand: [80, 120]
     base_lead_time: [1, 2]
@@ -41,6 +45,7 @@ products:
     stockout_penalty: 20
     waste_penalty: 5
   ice_cream:
+    description: sells most in hot weather
     storage: freezer
     base_demand: [15, 25]
     base_lead_time: [2, 4]
@@ -61,6 +66,19 @@ products:
     starting_inventory: [100, 300]
     stockout_penalty: 10
     waste_penalty: 1
+
+# The reasons level-2 news gives for this world's disruptions.
+news:
+  delay_causes:
+    - a strike at the regional distribution centre
+    - a flooded motorway
+    - a supplier's packaging shortage
+  cold_chain_delay_causes:           # used for products in cold-chain storage
+    - a breakdown of the refrigerated delivery lorry
+  surge_causes:
+    biscuits: a holiday promotion
+    milk: the holiday season
+    ice_cream: a heat wave
 
 tasks:
   normal_weeks:
