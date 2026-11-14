@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from math import ceil, exp, log, sqrt
 from random import Random
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from models import EpisodeConfig, InventoryState, SKUEpisodeConfig
 from news import add_news
+from world import World, WorldError, build_episode, default_world, load_world
 
 
 # ---------------------------------------------------------------------------
@@ -35,71 +36,48 @@ def combine_curves(curve_a: List[float], curve_b: List[float]) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# SKU catalogue
+# SKU catalogue: read from the built-in pharma world (worlds/pharma.yaml)
 # ---------------------------------------------------------------------------
-# Ranges are (low, high) and are sampled once per task build, so every
-# episode built with the same seed is identical.
-# waste_penalty weights each SKU's share of overflow waste in the reward
-# (see PharmaEnvironment._update_inventory_excess); only ratios matter.
-# Insulin is the cold-chain SKU (refrigerated pool); the other four use ambient storage.
+# The world file is the single source of the catalogue. The names below keep the
+# shape older code expects; ranges are (low, high), sampled once per task build, so
+# every episode built with the same seed is identical. waste_penalty weights each
+# SKU's share of overflow waste in the reward; only ratios matter.
 
-SKU_CATALOGUE: Dict[str, Dict] = {
-    "insulin": {
-        "cold_storage_required": True,
-        "stockout_penalty":      100.0,
-        "waste_penalty":         10.0,
-        "base_demand":           (8, 12),
-        "base_lead_time":        (4, 6),
-        "starting_inventory":    (1, 5),
-    },
-    "paracetamol": {
-        "cold_storage_required": False,
-        "stockout_penalty":      20.0,
-        "waste_penalty":         1.0,
-        "base_demand":           (180, 220),
-        "base_lead_time":        (1, 3),
-        "starting_inventory":    (1, 5),
-    },
-    "bp_medication": {
-        "cold_storage_required": False,
-        "stockout_penalty":      60.0,
-        "waste_penalty":         3.0,
-        "base_demand":           (40, 60),
-        "base_lead_time":        (2, 4),
-        "starting_inventory":    (1, 5),
-    },
-    "vitamins": {
-        "cold_storage_required": False,
-        "stockout_penalty":      5.0,
-        "waste_penalty":         0.5,
-        "base_demand":           (60, 90),
-        "base_lead_time":        (1, 2),
-        "starting_inventory":    (1, 5),
-    },
-    "hydroxychloroquine": {
-        "cold_storage_required": False,
-        "stockout_penalty":      35.0,
-        "waste_penalty":         4.0,
-        "base_demand":           (20, 40),
-        "base_lead_time":        (5, 8),
-        "starting_inventory":    (1, 5),
-    },
-}
+PHARMA_WORLD: World = default_world()
 
-EPISODE_DAYS = 60
+
+def _as_range(amount: Any) -> Tuple[float, float]:
+    return amount if isinstance(amount, tuple) else (amount, amount)
+
+
+def _catalogue(world: World) -> Dict[str, Dict]:
+    return {
+        sku_id: {
+            "cold_storage_required": world.storage[p.storage].cold_chain,
+            "stockout_penalty":      p.stockout_penalty,
+            "waste_penalty":         p.waste_penalty,
+            "base_demand":           _as_range(p.base_demand),
+            "base_lead_time":        _as_range(p.base_lead_time),
+            "starting_inventory":    _as_range(p.starting_inventory),
+        }
+        for sku_id, p in world.products.items()
+    }
+
+
+SKU_CATALOGUE: Dict[str, Dict] = _catalogue(PHARMA_WORLD)
+
+EPISODE_DAYS = PHARMA_WORLD.days
 # Each storage pool holds this many days of its SKUs' combined base demand.
-# 21 days leaves ~25% headroom over the worst case a perfect-foresight plan
-# needs on any task (about 17 days in flu_season, 12 days for insulin), so
-# good play always fits while hoarding overflows.
-AMBIENT_STORAGE_DAYS = 21.0
-COLD_STORAGE_DAYS = 21.0
+_POOL_DAYS = {pool.cold_chain: pool.capacity_days for pool in PHARMA_WORLD.storage.values()}
+AMBIENT_STORAGE_DAYS = _POOL_DAYS[False]
+COLD_STORAGE_DAYS = _POOL_DAYS[True]
 
-# Day-to-day randomness of the built-in tasks. Daily demand varies with a
-# standard deviation of DEMAND_NOISE_CV x base demand, and each order's lead time
-# with LEAD_TIME_NOISE_STD days. The environment draws this noise once per episode
-# from the seed, so it never depends on what the agent does.
-DEMAND_NOISE_CV = 0.12
-LEAD_TIME_NOISE_STD = 0.75
+# Day-to-day randomness. Daily demand varies with a standard deviation of
+# DEMAND_NOISE_CV x base demand, and each order's lead time with LEAD_TIME_NOISE_STD
+# days. The environment draws this noise once per episode from the seed, so it
+# never depends on what the agent does.
+DEMAND_NOISE_CV = PHARMA_WORLD.noise.demand_cv
+LEAD_TIME_NOISE_STD = PHARMA_WORLD.noise.lead_time_std
 
 
 def _build_episode(
@@ -317,22 +295,35 @@ SEED_SPLITS = {"train": TRAIN_SEEDS, "test": TEST_SEEDS}
 
 def get_task_config(
     task_name: str, seed: Optional[int] = None, news: int = 0, scenario: str = "fixed",
+    world: Union[World, str, Mapping[str, Any], None] = None,
 ) -> EpisodeConfig:
     """
-    Build the EpisodeConfig for a registered task.
+    Build the EpisodeConfig for a task of a world.
 
+    world: a World, a dict, or a built-in world's name (see world.load_world);
+    default the built-in pharma world, whose tasks are TASK_REGISTRY's.
     news: 0 (none, the original tasks), 1 or 2 announces the task's disruptions
     ahead of time (see news.py). News never changes the episode's world.
-    scenario: "fixed" (the original tasks) or "random" (disrupted SKUs and days drawn
-    per seed, less storage; see SCENARIOS).
+    scenario: "fixed" (the tasks as the world defines them) or "random" (disrupted
+    SKUs and days drawn per seed, less storage; see SCENARIOS). "random" is only
+    available for the pharma world for now.
     """
-    try:
-        task_fn = TASK_REGISTRY[task_name]
-    except KeyError:
+    world = PHARMA_WORLD if world is None else load_world(world)
+    if task_name not in world.tasks:
         raise ValueError(
-            f"Unknown task '{task_name}'. Available tasks: {sorted(TASK_REGISTRY)}"
-        ) from None
-    return add_news(task_fn(seed, scenario=scenario), news, seed)
+            f"Unknown task '{task_name}' in world '{world.name}'. Available tasks: {sorted(world.tasks)}"
+        )
+    if scenario not in SCENARIOS:
+        raise ValueError(f"scenario must be one of {SCENARIOS}, not {scenario!r}")
+    if scenario == "fixed":
+        config = build_episode(world, task_name, seed)
+    elif world != PHARMA_WORLD or task_name not in TASK_REGISTRY:
+        raise WorldError(f"scenario='random' is only available for the built-in pharma world, not world "
+                         f"'{world.name}'. In a world file, a task draws its own products and days per seed: "
+                         "give it `draw` names and day ranges (see world.py), and use scenario='fixed'")
+    else:
+        config = TASK_REGISTRY[task_name](seed, scenario=scenario)
+    return add_news(config, news, seed)
 
 
 # ---------------------------------------------------------------------------

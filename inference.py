@@ -235,8 +235,6 @@ ADJUST_DAYS_RANGE = (0.0, 10.0)
 MAX_DAYS_OF_STOCK = 21.0
 
 
-def system_prompt(action: str = "units") -> str:
-    return {"days": SYSTEM_PROMPT_DAYS, "adjust": SYSTEM_PROMPT_ADJUST}.get(action, SYSTEM_PROMPT)
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mandatory STDOUT format)
@@ -307,6 +305,43 @@ def storage_days(obs: InventoryState, cold: bool) -> Optional[float]:
     return round(total / demand, 1) if demand > 0 else None
 
 
+def pool_days(obs: InventoryState, pool_name: str) -> Optional[float]:
+    """storage_days() for one named pool: its capacity / recent demand of the SKUs in it."""
+    demand = sum(max(s.avg_demand_last_5_days, s.avg_demand_per_day)
+                 for s in obs.skus.values() if s.storage_pool == pool_name)
+    return round(obs.storage[pool_name].total_capacity / demand, 1) if demand > 0 else None
+
+
+def storage_report(obs: InventoryState) -> Dict[str, Any]:
+    """
+    The report's storage section. One cold-chain pool and one other pool (the pharma
+    world, and anything built from cold/ambient capacities) keep the original flat
+    cold_*/ambient_* keys, so prompts and trained models stay valid; any other layout
+    lists every pool by name.
+    """
+    if not obs.storage or obs.has_classic_storage():
+        return {
+            "cold_total":    round(obs.cold_storage_total_capacity, 1),
+            "cold_used":     round(obs.cold_storage_current_capacity, 1),
+            "cold_ratio":    round(obs.cold_storage_ratio, 3),
+            "ambient_total": round(obs.ambient_storage_total_capacity, 1),
+            "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
+            "ambient_ratio": round(obs.ambient_storage_ratio, 3),
+            "cold_days":     storage_days(obs, cold=True),
+            "ambient_days":  storage_days(obs, cold=False),
+        }
+    return {
+        name: {
+            "total":      round(pool.total_capacity, 1),
+            "used":       round(pool.current_capacity, 1),
+            "ratio":      round(pool.ratio, 3),
+            "days":       pool_days(obs, name),
+            "cold_chain": pool.cold_chain,
+        }
+        for name, pool in obs.storage.items()
+    }
+
+
 def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict[str, Any]:
     """
     Convert InventoryState to a clean dict for the LLM prompt.
@@ -320,16 +355,7 @@ def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict
     inbound = inbound_units_by_sku(obs)
     report: Dict[str, Any] = {
         "day":  obs.current_date,
-        "storage": {
-            "cold_total":    round(obs.cold_storage_total_capacity, 1),
-            "cold_used":     round(obs.cold_storage_current_capacity, 1),
-            "cold_ratio":    round(obs.cold_storage_ratio, 3),
-            "ambient_total": round(obs.ambient_storage_total_capacity, 1),
-            "ambient_used":  round(obs.ambient_storage_current_capacity, 1),
-            "ambient_ratio": round(obs.ambient_storage_ratio, 3),
-            "cold_days":     storage_days(obs, cold=True),
-            "ambient_days":  storage_days(obs, cold=False),
-        },
+        "storage": storage_report(obs),
         "expected_inbound_orders": obs.expected_inbound_orders,
         "inventory": {
             sku_id: {
@@ -351,6 +377,10 @@ def observation_to_dict(obs: InventoryState, include_cover: bool = True) -> Dict
             for sku_id, sku in obs.skus.items()
         },
     }
+    if obs.storage and not obs.has_classic_storage():
+        # Pools are listed by name: say which one each SKU uses.
+        for sku_id, sku in report["inventory"].items():
+            sku["storage_pool"] = obs.skus[sku_id].storage_pool
     if not include_cover:
         for sku in report["inventory"].values():
             del sku["days_of_cover"]
@@ -569,6 +599,129 @@ SKU_ALIASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Prompts written from the world
+# ---------------------------------------------------------------------------
+# The constants above are the built-in pharma world's prompts and never change, so models
+# trained on them stay valid. An episode of any other world carries a context
+# (InventoryState.context: the business and the products' names); its prompts are the
+# same texts with the pharma-specific sentences swapped for ones about that world.
+
+def _swap(text: str, old: str, new: str) -> str:
+    """text with `old` replaced by `new`; `old` must be there, so a reworded prompt cannot silently skip a swap."""
+    if old not in text:
+        raise ValueError(f"prompt text not found: {old[:60]!r}")
+    return text.replace(old, new)
+
+
+def _swap_if_present(text: str, swaps: List[Tuple[str, str]]) -> str:
+    for old, new in swaps:
+        text = text.replace(old, new)
+    return text
+
+
+def has_own_words(obs: Optional[InventoryState]) -> bool:
+    """True when the episode's world supplies its own wording (every world but the built-in pharma one)."""
+    return obs is not None and obs.context is not None
+
+
+def has_classic_storage(obs: InventoryState) -> bool:
+    """One cold-chain pool and one other pool: the report uses the cold_*/ambient_* keys."""
+    return not obs.storage or obs.has_classic_storage()
+
+
+def products_text(obs: InventoryState, cold_note: bool = False) -> str:
+    """One line per SKU: its id, its plain name and description (and, optionally, that it is refrigerated)."""
+    width = max(len(sku_id) for sku_id in obs.skus)
+    lines = []
+    for sku_id, sku in obs.skus.items():
+        info = obs.context.products.get(sku_id) if obs.context else None
+        text = info.name if info else sku_id.replace("_", " ")
+        if info and info.description:
+            text += f", {info.description}"
+        if cold_note and sku.cold_storage_required:
+            text += ", kept in cold storage"
+        lines.append(f"  {sku_id:<{width}}  - {text}")
+    return "\n".join(lines)
+
+
+_POOLS_TEXT = textwrap.dedent("""
+    The report's storage section lists every storage pool by name, with:
+      total, used, ratio  — its capacity in units, the units it holds now, and used / total.
+      days                — how many days of current demand the pool can hold, for all its
+                            SKUs together (null until any demand has been observed).
+      cold_chain          — true for refrigerated storage.
+    Each SKU is kept in the pool named by its storage_pool and shares it with that pool's other SKUs.
+""").strip()
+
+# Sentences that name pharma products, swapped in every world with its own wording.
+_GENERIC_SWAPS = [
+    ("wasted cold-storage (insulin)\n   deliveries cost the most",
+     "wasted deliveries of SKUs with a\n   high waste_penalty cost the most"),
+    ("wasted insulin costs the most", "wasted deliveries of SKUs with a high waste_penalty cost the most"),
+]
+# Sentences about the cold/ambient report keys, swapped when the report lists pools by name.
+_POOL_SWAPS = [
+    ("cold_days / ambient_days days of its SKUs' demand",
+     "as many days of its SKUs' demand as the days shown for it in the report"),
+    ("(watch cold_ratio and ambient_ratio)", "(watch each pool's ratio)"),
+    ("If cold_ratio or ambient_ratio is", "If a pool's ratio is"),
+]
+
+
+def _intro(obs: InventoryState) -> str:
+    text = _swap(_PROMPT_INTRO,
+                 "You are a pharmaceutical warehouse procurement agent managing a cold-chain inventory over a multi-day episode.",
+                 f"You are the procurement agent of {obs.context.business}, managing its inventory over a multi-day episode.")
+    text = _swap(text, "Maximise prescription fill rate", "Maximise the demand fill rate")
+    text = _swap(text, "SKUS\n----", f"PRODUCTS\n--------\n{products_text(obs)}\n\nSKUS\n----")
+    if not has_classic_storage(obs):
+        start, end = text.index("Two storage pools:"), text.index("Do not order quantities")
+        text = text[:start] + _POOLS_TEXT + "\n" + text[end:]
+        text = _swap(text, "  cold_storage_required        — true means this SKU uses the cold storage pool.",
+                     "  cold_storage_required        — true means this SKU is kept in a refrigerated (cold-chain) pool.\n"
+                     "  storage_pool                 — the storage pool this SKU is kept in.")
+    return text
+
+
+def system_prompt(action: str = "units", obs: Optional[InventoryState] = None) -> str:
+    """
+    The system prompt of an answer format. Without `obs`, or for an episode of the
+    built-in pharma world, the original prompt; for any other world, the same prompt
+    about that world: its business, its products and, when the report lists storage
+    pools by name, its pools.
+    """
+    rules = {"days": _DAYS_RULES, "adjust": _ADJUST_RULES}.get(action, _UNITS_RULES)
+    if not has_own_words(obs):
+        return _PROMPT_INTRO + "\n\n" + rules
+    rules = _swap_if_present(rules, _GENERIC_SWAPS)
+    if not has_classic_storage(obs):
+        rules = _swap_if_present(rules, _POOL_SWAPS)
+    return _intro(obs) + "\n\n" + rules
+
+
+def news_system_prompt(obs: Optional[InventoryState] = None) -> str:
+    """NEWS_SYSTEM_PROMPT, about the episode's own business and products when it has its own wording."""
+    if not has_own_words(obs):
+        return NEWS_SYSTEM_PROMPT
+    text = _swap(NEWS_SYSTEM_PROMPT, "the procurement team of a pharmaceutical warehouse",
+                 f"the procurement team of {obs.context.business}")
+    start = text.index("  insulin ")
+    end = text.index("\n\nGUIDELINES")
+    return text[:start] + products_text(obs, cold_note=True) + text[end:]
+
+
+def sku_aliases(obs: InventoryState) -> Dict[str, str]:
+    """Lower-case names a model may use for a SKU instead of its id -> the sku_id."""
+    if not has_own_words(obs):
+        return SKU_ALIASES
+    aliases: Dict[str, str] = {}
+    for sku_id, info in obs.context.products.items():
+        for label in (info.name, *info.aliases):
+            aliases[label.strip().lower()] = sku_id
+    return aliases
+
+
 def build_news_prompt(obs: InventoryState) -> str:
     """Today's news and, per product, the numbers the guidelines use."""
     lines = [f"Today is day {obs.current_date}.", "", "NEWS (each item starts with the day it was published):"]
@@ -594,10 +747,11 @@ def parse_extra_days(obs: InventoryState, reply: Dict[str, Any]) -> Dict[str, fl
     numbers only; anything else is ignored. Clipping is left to agents.baseline_policy.
     """
     known = {sku_id.lower(): sku_id for sku_id in obs.skus}
+    aliases = sku_aliases(obs)
     extra: Dict[str, float] = {}
     for name, value in reply.items():
         key = str(name).strip().lower()
-        sku_id = known.get(key) or known.get(SKU_ALIASES.get(key, ""))
+        sku_id = known.get(key) or known.get(aliases.get(key, "").lower())
         if sku_id is None or isinstance(value, bool):
             continue
         try:

@@ -22,6 +22,7 @@ from random import Random
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from tasks import TASK_REGISTRY
+from training.teacher import answer_text, normal_lead_times, teacher_answer
 from training.grpo_reward import (PENALTY_NO_JSON, PENALTY_OUT_OF_RANGE, DayPrompt, GRPOReward, build_state,
                                   news_day_prompts, prompt_messages)
 
@@ -60,12 +61,16 @@ class ProbeItem:
 
 
 def build_probe(seeds: Iterable[int] = PROBE_SEEDS, count: int = 100, reward: Optional[GRPOReward] = None,
-                tasks: Optional[Sequence[str]] = None, salt: str = "probe") -> List[ProbeItem]:
-    """`count` news days drawn evenly from the tasks of these episodes (deterministic)."""
+                tasks: Optional[Sequence[str]] = None, salt: str = "probe", states: str = "baseline") -> List[ProbeItem]:
+    """
+    `count` news days drawn evenly from the tasks of these episodes (deterministic),
+    with `states` (the baseline or the teacher) playing up to each day. The reference
+    answers are scored with `reward`, so pass the reward the model is trained with.
+    """
     reward = reward or GRPOReward()
     tasks = sorted(tasks or TASK_REGISTRY)
     seeds = list(seeds)
-    per_task = [news_day_prompts([t], seeds) for t in tasks]
+    per_task = [news_day_prompts([t], seeds, states=states) for t in tasks]
     picked: List[DayPrompt] = []
     for i, prompts in enumerate(per_task):
         want = count // len(tasks) + (i < count % len(tasks))
@@ -76,6 +81,15 @@ def build_probe(seeds: Iterable[int] = PROBE_SEEDS, count: int = 100, reward: Op
         skus = news_skus(p)
         items.append(ProbeItem(p, prompt_messages(p), skus, reference_rewards(reward, p, skus)))
     return items
+
+
+def teacher_texts(items: Sequence[ProbeItem]) -> List[str]:
+    """The teacher's answer to each probe item (training/teacher.py): a reference to compare a model with."""
+    texts = []
+    for item in items:
+        env, obs, _ = build_state(item.prompt)
+        texts.append(answer_text(teacher_answer(obs, env._episode_config.news, normal_lead_times(env))))
+    return texts
 
 
 def score_probe(items: Sequence[ProbeItem], texts: Sequence[str],

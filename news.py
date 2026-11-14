@@ -149,20 +149,34 @@ def _surge_size(m: float) -> str:
     return "rise several-fold"
 
 
-def varied_message(event: Dict, rng: Random) -> str:
+def varied_message(event: Dict, rng: Random, config: Optional[EpisodeConfig] = None) -> str:
     """
     Level 2: one of several wordings, with timing relative to the publication day and
     approximate (+-1 day on the start, +-2 on the length and peak) and severity in words
     or a rounded number.
+
+    The product's name and the cause come from the episode's own wording (config.context,
+    config.news_wording) when it has one; without it (the built-in pharma world) the
+    original pharma wording is used. Both draw the same random numbers in the same order.
     """
-    product = PRODUCT_NAMES.get(event["sku_id"], event["sku_id"])
+    own_words = config is not None and config.context is not None and config.news_wording is not None
+    if own_words:
+        info = config.context.products.get(event["sku_id"])
+        product = info.name if info else event["sku_id"]
+    else:
+        product = PRODUCT_NAMES.get(event["sku_id"], event["sku_id"])
     lead = event["start_day"] - event["announce_day"]
     when = _in_days(max(1, lead + rng.randint(-1, 1)))
     length = _duration(max(2, event["end_day"] - event["start_day"] + 1 + rng.randint(-2, 2)))
     m = event["multiplier"]
 
     if event["kind"] == "supplier_delay":
-        causes = COLD_CHAIN_CAUSES if event["sku_id"] == "insulin" else DELAY_CAUSES
+        if own_words:
+            wording, sku = config.news_wording, config.skus.get(event["sku_id"])
+            cold = bool(sku and sku.cold_storage_required and wording.cold_chain_delay_causes)
+            causes = wording.cold_chain_delay_causes if cold else wording.delay_causes
+        else:
+            causes = COLD_CHAIN_CAUSES if event["sku_id"] == "insulin" else DELAY_CAUSES
         cause = rng.choice(causes)
         severity = _delay_severity(m, rng)
         templates = (
@@ -175,9 +189,21 @@ def varied_message(event: Dict, rng: Random) -> str:
         )
         return rng.choice(templates)
 
-    outbreak = OUTBREAKS.get(event["sku_id"], "an outbreak")
     peak_in = max(1, event["peak_day"] - event["announce_day"] + rng.randint(-2, 2))
     surge = _surge_size(m)
+    if own_words:
+        wording = config.news_wording
+        cause = wording.surge_causes.get(event["sku_id"], wording.default_surge_cause)
+        templates = (
+            f"Forecast update: because of {cause}, demand for {product} is expected to {surge} "
+            f"{when}, peaking in about {peak_in} days.",
+            f"Planning note: {cause} is on the way. Sales of {product} could {surge} {when} "
+            f"and stay high for {length}.",
+            f"Sales teams report early signs of {cause}. Expect {product} demand to {surge}, "
+            f"starting {when}; the peak is likely in about {peak_in} days.",
+        )
+        return rng.choice(templates)
+    outbreak = OUTBREAKS.get(event["sku_id"], "an outbreak")
     templates = (
         f"Health authorities warn of {outbreak}. Demand for {product} is expected to {surge} "
         f"{when}, peaking in about {peak_in} days.",
@@ -206,7 +232,7 @@ def add_news(config: EpisodeConfig, level: int, seed: Optional[int]) -> EpisodeC
     events = []
     for event in find_events(config):
         event["announce_day"] = max(0, event["start_day"] - rng.randint(*ANNOUNCE_DAYS_AHEAD))
-        event["message"] = exact_message(event) if level == 1 else varied_message(event, rng)
+        event["message"] = exact_message(event) if level == 1 else varied_message(event, rng, config)
         events.append(NewsEvent(**event))
     return config.model_copy(update={"news": events})
 

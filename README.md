@@ -42,7 +42,9 @@ The hard parts are:
 | Cold storage | 21 days of insulin demand (about 170–250 units) | Insulin |
 | Ambient storage | 21 days of the other four SKUs' combined demand (about 6,300–8,600 units) | Paracetamol, BP medication, vitamins, HCQ |
 
-Each pool's capacity is 21 times the summed base demand of the SKUs stored in it, so it scales with the demand drawn for each episode. That is about 25% more than the most a perfect-foresight plan ever needs on any task, so good play always fits, while over-ordering overflows and the excess is wasted (see Scoring). `AMBIENT_STORAGE_DAYS` and `COLD_STORAGE_DAYS` in `tasks.py` set the sizes.
+Each pool's capacity is 21 times the summed base demand of the SKUs stored in it, so it scales with the demand drawn for each episode. That is about 25% more than the most a perfect-foresight plan ever needs on any task, so good play always fits, while over-ordering overflows and the excess is wasted (see Scoring). The sizes are set in [`worlds/pharma.yaml`](worlds/pharma.yaml) (`capacity_days`).
+
+These are the pharma world's two pools; a world file can declare any number, with any names (see "Your own inventory" below). The observation lists every pool in `storage` (`total_capacity`, `current_capacity`, `cold_chain`), and each SKU names its pool in `storage_pool`. The `cold_storage_*` and `ambient_storage_*` fields are the totals over cold-chain pools and over the other pools, which for pharma are exactly the two pools.
 
 ### SKUs
 
@@ -189,11 +191,60 @@ The scenario has its own random generator, so base demand, lead times, starting 
 | Baseline | 0.867 | 0.859 |
 | Calendar per task, day and SKU (no reading) | 0.900 | 0.868 |
 | +3 days on every SKU (no reading) | 0.886 | 0.869 |
-| Perfect news reading | 0.902 | 0.877 |
+| Perfect news reading, extra-days rule (`baseline_news`) | 0.902 | 0.877 |
+| Perfect news reading, inventory plan (`news_plan`) | 0.909 | 0.892 |
 | Oracle | 0.931 | 0.925 |
-| **Perfect news reading minus "+3 days on every SKU"** | +0.017 ± 0.003, but a calendar reproduces it | **+0.008 ± 0.003** |
+| **Extra-days rule minus "+3 days on every SKU"** | +0.017 ± 0.003, but a calendar reproduces it | **+0.008 ± 0.003** |
+| **Inventory plan minus "+3 days on every SKU"** | +0.023 ± 0.004 | **+0.023 ± 0.004** |
 
-In the random scenario the calendar earns 50% of perfect news reading's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. That margin is small: the perfect news reading rule closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit), so a better reading rule, or reinforcement learning on the environment's reward, has more to gain than imitating it. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
+In the random scenario the calendar earns 50% of the extra-days rule's gain instead of 94%, and what reading adds over the best fixed habit cannot be had without reading. With the extra-days rule that margin is small: it closes only 27% of the gap to the oracle here (it ignores storage, and on flu_season it adds nothing over the habit). The weakness is the rule, not the news: the inventory plan (`news_plan`, see [News](#news-disruptions-announced-ahead-of-time)) reads the same published events and closes 50% of the gap, three times the margin over the best habit (+0.023 against +0.008), while wasting far fewer units (311 per episode against 1,763). It is the reference to aim for, and the better teacher. Of the storage sizes tried (21, 17, 14 days), 14 gave reading the largest margin over the best habit.
+
+
+### Your own inventory: world files
+
+The products, storage and tasks above are not hard-coded: they live in a **world file**, [`worlds/pharma.yaml`](worlds/pharma.yaml). Describe your own inventory in the same format and every agent, the news and `eval.py` work on it:
+
+```bash
+uv run python eval.py --world examples/worlds/grocery.yaml --agent baseline --episodes 20
+uv run python eval.py --world examples/worlds/grocery.yaml --agent oracle   --episodes 20 --news 1
+```
+
+A world file has four parts (the complete reference is at the top of [`world.py`](world.py), and [`examples/worlds/grocery.yaml`](examples/worlds/grocery.yaml) is a worked example):
+
+```yaml
+name: my_store
+business: a neighbourhood grocery store   # who the agent works for (used in the prompts)
+days: 45
+storage:                                  # any number of pools, any names
+  fridge:  {capacity_days: 10, cold_chain: true}
+  freezer: {capacity_days: 14, cold_chain: true}
+  shelf:   {capacity_days: 21}
+products:                                 # any number, any names
+  milk: {storage: fridge, base_demand: [80, 120], base_lead_time: [1, 2],
+         starting_inventory: [100, 200], stockout_penalty: 50, waste_penalty: 8,
+         name: fresh milk, description: "sold daily, spoils fast"}
+news:                                     # the reasons news gives for disruptions
+  delay_causes: [a flooded motorway, a strike at the distribution centre]
+  surge_causes: {milk: the holiday season}
+tasks:                                    # the same products under different events
+  holiday_rush:
+    events:
+      - {type: demand_step,    product: milk, start_day: 20, end_day: 27, multiplier: [1.8, 2.2]}
+      - {type: demand_wave,    product: milk, peak_day: 24, amplitude: [0.5, 1.0], width: 4}
+      - {type: supplier_delay, product: milk, start_day: 15, end_day: 24, multiplier: [2, 3]}
+```
+
+- **Amounts** are a number or a `[low, high]` range drawn once per episode from the seed, so a seed always gives the same episode and thousands of seeds give thousands of variations.
+- **Events:** `supplier_delay` (lead time × multiplier for orders placed in a window), `demand_wave` (a bell-shaped rise around a peak day) and `demand_step` (demand × multiplier in a window: a promotion, or a closure below 1). News announces them like the built-in tasks' events.
+- **Mistakes are reported with where they are**: an unknown product, a range with low > high, a day past the end of the episode, a misspelt key or a key written twice.
+- **Storage pools** each hold `capacity_days` of their products' base demand, and a delivery that does not fit in its own pool is wasted even when another pool has room. With one cold-chain pool and one other pool (like pharma) the LLM report keeps the original `cold_*`/`ambient_*` keys, so existing prompts and trained models are unaffected; any other layout is reported pool by pool, with each SKU's `storage_pool`.
+- **Where and when can be drawn per seed.** With fixed products and days every episode of a task is disrupted the same way, and a fixed timetable can replace reading the news. A task can instead `draw` its products (`struck: any`, or one of a list) and take day ranges (`start_day: [8, 25]`, `duration: [8, 12]`, `peak_day: [18, 34]`), and can have its own storage size (`storage_days: {shelf: 14}`). Products and days come from their own generator, so a task and its drawn twin share demand, lead times and event sizes per seed. In the grocery example's `surprise_disruptions` task (100 test seeds, level-2 news) keeping 3 extra days of everything scores 0.939, *below* the baseline's 0.951, while the news plan scores 0.969 and closes 47% of the gap to the oracle (0.989).
+- **Prompts and news are written from the world.** The LLM is told whose inventory it manages (`business`), gets a list of the products with their plain names and descriptions, and reads news that names those products and the causes you list: *"Planning note: a heat wave is on the way. Sales of ice cream could roughly double in about 7 days and stay high for roughly 2 weeks."* A model may answer with a product's id, its name or one of its `aliases`. All of these fields are optional. The built-in pharma world is the exception: it keeps its original wording, byte for byte, so existing results and trained models stay valid; an edited copy of `pharma.yaml` is a world of its own and gets its words from the file.
+- The pharma world builds exactly the original tasks (checked config by config, so every published score stands). In code: `world.load_world(path)` and `env.reset(world=..., task_name=..., seed=...)`.
+
+`--random-scenarios` remains the pharma world's own, older form of this (its tasks drawn by code in `tasks.py`); other worlds use `draw` and day ranges in the file.
+
+**Not yet (planned):** the local LLM runner and dashboard picking a world; training (`training/`) on worlds other than pharma.
 
 ---
 
@@ -271,6 +322,22 @@ The observation's `news` list holds every item already published whose event has
 
 Level 2 gives nearly the same scores (0.903 overall, 55% of the gap), since the rule reads the events, not the text. The open question for an LLM is how much of that +0.036 it recovers from the text alone, especially at level 2.
 
+**Reference: an inventory plan from the news (`news_plan`).** `baseline_news` keeps the baseline and adds days to it. `news_plan` (`agents.news_plan_orders`) instead replaces, for every SKU with published news, the two estimates the baseline can only correct after a disruption shows:
+
+- **Lead time.** An order placed during a published delay takes the normal lead time × the delay's multiplier. Stock has to last until the first later order can arrive, so the plan covers the earliest arrival of any order placed from tomorrow on: the normal lead time before a delay, and up to the delay's end or the slow lead time (whichever is sooner) just before and during one.
+- **Demand.** Normal demand is past sales with the published surges divided out, and each coming day is forecast as normal demand × that day's multiple, so the forecast rises ahead of a wave and falls after its peak instead of lagging it.
+
+The target is the forecast demand over that cover period plus 3 safety days, capped at the SKU's share of its storage pool plus what is consumed while the order travels. It uses only the published events' fields and the observation (the normal lead time is the first report's `avg_lead_time`), SKUs without news are ordered exactly as the baseline orders them, and without news the agent *is* the baseline.
+
+| Agent (50 test seeds per task) | Supply Chain | Flu Season | Epidemic Two Waves | Gap to oracle closed |
+|---|:---:|:---:|:---:|:---:|
+| `baseline_news`, news level 1 | 0.898 ± 0.005 | 0.904 ± 0.004 | 0.907 ± 0.004 | 56% |
+| `news_plan`, news level 1 | 0.907 ± 0.003 | 0.911 ± 0.002 | 0.907 ± 0.003 | 64% |
+| `baseline_news`, random scenario, level 2 | 0.892 ± 0.006 | 0.877 ± 0.015 | 0.861 ± 0.019 | 27% |
+| `news_plan`, random scenario, level 2 | 0.906 ± 0.003 | 0.889 ± 0.009 | 0.881 ± 0.011 | 50% |
+
+Seed by seed, `news_plan` beats `baseline_news` by +0.006 ± 0.002 on the fixed tasks and +0.015 ± 0.005 in the random scenario. The difference is largest where storage is tight and the disrupted SKU is not known in advance, which is where a plan that sizes orders to the delay and to the pool matters most.
+
 ## LLM results
 
 Small models run locally with Ollama (`local_llm/run_local_llm.py`, temperature 0.2) on test seeds. Every run below is scored under the **current** reward (fill weighted by `stockout_penalty`): each episode saved the exact order sent every day, and since a seed fixes the world, replaying those orders in the current environment reproduces the run exactly (the same fill rate for every SKU on every day) and gives its score under today's reward. The reference agents are scored on the same seeds. The prompts also changed between runs (each run used the prompt of its answer format at the time); rescoring changes only the reward, not what the model saw.
@@ -312,10 +379,11 @@ LLM agents answer in adjustment days by default; `--action days` or `--action un
 
 **Running a model on your own computer:** see [`local_llm/README.md`](local_llm/README.md). One command, e.g. `uv run python local_llm/run_local_llm.py --model qwen2.5:3b`, sets up the model with Ollama the first time and runs it against the baseline and oracle on the same seeds.
 
-**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against), `llm` (the same prompt as `inference.py`), and, for news (`--news 1` or `2`), `baseline_news` (perfect news reading, a reference) and `llm_news` (the hybrid: the LLM reads the news, the baseline orders).
+**Agents** (`agents.py`): `nothing` (the floor), `baseline` (an order-up-to rule), `oracle` (reads the episode's hidden demand and lead times and plans just-in-time deliveries; the ceiling, never something to train against), `llm` (the same prompt as `inference.py`), and, for news (`--news 1` or `2`), `baseline_news` and `news_plan` (perfect news reading with an extra-days rule and with an inventory plan; references) and `llm_news` (the hybrid: the LLM reads the news, the baseline orders).
 
 ```bash
 uv run python eval.py --agent baseline_news --news 2 --split test --episodes 50
+uv run python eval.py --agent news_plan     --news 2 --split test --episodes 50 --random-scenarios
 uv run python eval.py --agent llm_news --news 2 --model qwen2.5:3b --base-url http://localhost:11434/v1 \
                       --split test --episodes 10 --save-steps
 ```
@@ -339,6 +407,29 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 
 `training/grpo_reward.py` scores answers in the `adjust` format for GRPO training, using the simulator only (no model calls). One prompt is one day with visible news in the random scenario (level-2 news, train seeds), rebuilt by letting the baseline play the earlier days. An answer's reward is how much better than answering 0 it does over the next 15 days (the answer sets today's order, then the baseline orders), averaged over 4 possible futures that every answer to the same prompt shares, in points (hundredths of a day's reward, per day), with small penalties for an answer without JSON (-1) or with values outside 0..10 (-0.25). The rules and the measurements behind each one are in [`training/REWARD.md`](training/REWARD.md). Scoring a group of 8 answers takes about 0.1 s.
 
+### The teacher: a warm start before GRPO
+
+GRPO only compares the answers the model happens to give, so it starts slowly from a model that has no idea how many days a delay is worth. `training/teacher.py` gives it a head start. The **teacher** is the news plan (`news_plan`, see [News](#news-disruptions-announced-ahead-of-time)) answering in the model's own `adjust` format: whole extra days from 0 to 10 for the SKUs in today's news, 0 for the rest. Played through the model's answer path it scores:
+
+| 50 test seeds per task, level-2 news | Fixed tasks | Random scenario |
+|---|:---:|:---:|
+| Baseline | 0.867 | 0.859 |
+| "+3 days on every SKU" | 0.886 | 0.869 |
+| `baseline_news` (extra-days rule) | 0.903 | 0.877 |
+| **Teacher (news plan in the `adjust` format)** | **0.909** | **0.887** |
+| `news_plan` (exact orders) | 0.909 | 0.892 |
+| Oracle | 0.931 | 0.925 |
+
+The format costs the plan 0.005 in the random scenario, mostly because it cannot go below the baseline's default when demand falls after a peak (allowing -3 would recover 0.003; rounding to whole days costs nothing).
+
+```bash
+uv run python -m training.teacher --seeds 0:300 --out data/teacher_adjust.jsonl   # supervised examples, no GPU
+```
+
+Each example is the exact chat the model gets on one day plus the teacher's answer. Every news day is kept and 15% of the days without news (answer: all zeros); half of the episodes are played by the teacher and half by the baseline, so the model sees both kinds of state. About half of the news-day answers are all zeros, which teaches holding back as well as reacting. Examples only come from train seeds outside the probe exam's (checked). 120 episodes give about 5,500 examples in 6 seconds.
+
+**The GRPO reward had to change with it.** Judged by the original reward (the answer today, then the *baseline* for 15 days), the teacher's answers score below flat "+7 on the news SKUs", because with the baseline continuing the answer is the only chance to react and stockpiling pays. GRPO would then un-teach the warm start. `GRPOReward(continuation="teacher")` lets the teacher order on the following days instead, so an answer is judged as one step of good play: the teacher's answer then beats every flat answer (+0.270 ± 0.184 points over +10 on 300 news days), while the best answer per day is still better than the teacher's, which is what GRPO can add. Prompts can likewise come from the teacher's play (`news_day_prompts(..., states="teacher")`). Both default to the baseline, the original behaviour; the measurements are in [`training/REWARD.md`](training/REWARD.md).
+
 ## Training Phi-4-mini with GRPO (Kaggle)
 
 `training/grpo_phi4mini_kaggle.ipynb` is the full run, in clearly separated cells:
@@ -347,9 +438,10 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 2. Phi-4-mini in 4-bit with LoRA (Unsloth);
 3. training prompts (news days, train seeds 0–8999) and a probe exam on held-out seeds 9000–9099;
 4. the untrained model on test seeds;
-5. GRPO with health metrics and a probe exam every 25 steps;
+   - 4b. the **warm start** (`WARM_START = True`, the default): supervised fine-tuning on the teacher's answers, loss on the answer tokens only, then the probe exam again;
+5. GRPO with health metrics and a probe exam every 25 steps (after a warm start: prompts from the teacher's play, the teacher continuing in the reward, no KL penalty);
 6. saving the LoRA adapter;
-7. after-training evaluation: test-seed probe, full 60-day episodes against the baseline, "+3 everywhere", perfect news reading and the oracle with paired 95% intervals, plus news-0 and fixed-scenario checks;
+7. after-training evaluation: test-seed probe, full 60-day episodes against the baseline, "+3 everywhere", perfect news reading, the teacher and the oracle with paired 95% intervals (and what the warm start and GRPO each contributed), plus news-0 and fixed-scenario checks;
 8. a verdict, a GGUF export for Ollama, and a results zip.
 
 **To run it on Kaggle:**
@@ -357,12 +449,14 @@ This prints the mean per-seed difference with its 95% confidence interval and, w
 2. Turn on GPU T4 ×1 and Internet.
 3. Choose *Save Version → Save & Run All*.
 
-It takes about 6–8 h with the default config. For a quick first run, lower `TRAIN_STEPS` and `EVAL_SEEDS` in the config cell.
+It takes about 6–8 h with the default config, plus the warm start (not yet timed on a T4; expect roughly an hour). For a quick first run, lower `TRAIN_STEPS`, `EVAL_SEEDS` and `SFT_EXAMPLES` in the config cell. `WARM_START = False` runs GRPO alone, as before. The notebook clones the `feature/scenario-config` branch until that is merged (`BRANCH` in the setup cell).
 
 The notebook's GPU-free helpers are tested in `tests/test_training_helpers.py`:
 - `training/probe.py`: the probe exam;
 - `training/episodes.py`: batched full episodes with a local model;
 - `training/monitor.py`: the training-health numbers.
+
+`tests/test_notebook_dry_run.py` also executes every code cell of the notebook with stand-ins for the model, tokenizer and trainers, with and without the warm start, so the notebook's own logic is checked without a GPU. The training itself has not been run since the warm start was added.
 
 ## Setup
 
@@ -451,7 +545,10 @@ uv run python smoke_test.py --http # also exercises the client (server must be r
 pharma_coldstorage_env/
 ├── models.py          # Pydantic schemas: SKUState, InventoryState,
 │                      # PharmaAction, EpisodeConfig, SKUEpisodeConfig
-├── tasks.py           # Task constructors (demand/lead-time curves)
+├── world.py           # World files: schema, loading, building episodes
+├── worlds/pharma.yaml # The built-in pharma world (products, storage, tasks)
+├── examples/worlds/   # Example world files to copy (grocery.yaml)
+├── tasks.py           # The pharma tasks, random scenarios
 │                      # + compute_step_reward, compute_final_score
 ├── inference.py       # Benchmark runner — loops over TASK_REGISTRY
 ├── agents.py          # Agents: nothing, baseline, oracle, LLM

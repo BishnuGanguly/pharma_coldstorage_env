@@ -16,8 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from training.grpo_reward import (NEWS_LEVEL, PENALTY_NO_JSON, PENALTY_OUT_OF_RANGE, SCENARIO, DayPrompt,
-                                  GRPOReward, completion_text)
+from training.grpo_reward import PENALTY_NO_JSON, PENALTY_OUT_OF_RANGE, DayPrompt, GRPOReward, completion_text
 
 
 class MonitoredReward(GRPOReward):
@@ -33,12 +32,10 @@ class MonitoredReward(GRPOReward):
 
     def __call__(self, completions: Sequence[Any], task: Sequence[str], seed: Sequence[int],
                  day: Sequence[int], scenario: Optional[Sequence[str]] = None,
-                 news: Optional[Sequence[int]] = None, **_: Any) -> List[float]:
+                 news: Optional[Sequence[int]] = None, states: Optional[Sequence[str]] = None,
+                 **_: Any) -> List[float]:
         rewards = []
-        for i, completion in enumerate(completions):
-            prompt = DayPrompt(task[i], int(seed[i]), int(day[i]),
-                               scenario[i] if scenario is not None else SCENARIO,
-                               int(news[i]) if news is not None else NEWS_LEVEL)
+        for prompt, completion in zip(self.prompts_of(task, seed, day, scenario, news, states), completions):
             s = self.score_answer(prompt, completion_text(completion))
             extra = {k: v for k, v in s["extra_days"].items() if v > 0}
             top = max(extra, key=extra.get) if extra else None

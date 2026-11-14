@@ -84,7 +84,8 @@ def test_prompt_is_what_the_llm_agent_sends(prompts):
 
 def test_dataset_rows_carry_the_columns_the_reward_reads(prompts):
     row = G.dataset_rows(prompts[:1])[0]
-    assert set(row) == {"prompt", "task", "seed", "day", "scenario", "news"}
+    assert set(row) == {"prompt", "task", "seed", "day", "scenario", "news", "states"}
+    assert row["states"] == "baseline"
     assert row["prompt"][0]["role"] == "system"
 
 

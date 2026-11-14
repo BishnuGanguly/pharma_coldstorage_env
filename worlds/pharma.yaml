@@ -1,0 +1,121 @@
+# The built-in pharma world: the original environment, as data.
+#
+# Copy this file to describe your own inventory (see world.py for every field):
+#   uv run python eval.py --world worlds/my_store.yaml --agent baseline
+#
+# Any amount can be a number or a [low, high] range, drawn once per episode from the
+# seed. Order matters for reproducibility: events are drawn in the order listed, then
+# products in the order listed.
+
+name: pharma
+description: >
+  A pharmaceutical warehouse with a refrigerated pool for insulin and an ambient pool
+  for everything else, facing supplier delays and epidemic demand waves.
+# The built-in pharma world keeps its original prompt and news wording, which trained
+# models rely on. The words below (business, product names, news causes) are what a
+# changed copy of this file starts from: any other world's prompts and news are written
+# from these fields.
+business: a pharmaceutical warehouse
+days: 60
+
+noise:
+  demand_cv: 0.12        # daily demand varies by 12% of base demand (standard deviation)
+  lead_time_std: 0.75    # each order's lead time varies by 0.75 days (standard deviation)
+
+# Each pool holds capacity_days days of its products' combined base demand. 21 days
+# leaves ~25% headroom over what a perfect-foresight plan needs on any task, so good
+# play always fits while hoarding overflows.
+storage:
+  cold:
+    capacity_days: 21
+    cold_chain: true
+  ambient:
+    capacity_days: 21
+
+# stockout_penalty weights each product's fill rate in the reward; waste_penalty
+# weights its share of overflow waste. Only the ratios between products matter.
+products:
+  insulin:
+    description: for diabetes, must stay refrigerated
+    storage: cold
+    base_demand: [8, 12]
+    base_lead_time: [4, 6]
+    starting_inventory: [1, 5]
+    stockout_penalty: 100
+    waste_penalty: 10
+  paracetamol:
+    description: fever and pain relief
+    storage: ambient
+    base_demand: [180, 220]
+    base_lead_time: [1, 3]
+    starting_inventory: [1, 5]
+    stockout_penalty: 20
+    waste_penalty: 1
+  bp_medication:
+    name: blood-pressure medication
+    aliases: [blood pressure medication, amlodipine]
+    storage: ambient
+    base_demand: [40, 60]
+    base_lead_time: [2, 4]
+    starting_inventory: [1, 5]
+    stockout_penalty: 60
+    waste_penalty: 3
+  vitamins:
+    storage: ambient
+    base_demand: [60, 90]
+    base_lead_time: [1, 2]
+    starting_inventory: [1, 5]
+    stockout_penalty: 5
+    waste_penalty: 0.5
+  hydroxychloroquine:
+    aliases: [hcq]
+    storage: ambient
+    base_demand: [20, 40]
+    base_lead_time: [5, 8]
+    starting_inventory: [1, 5]
+    stockout_penalty: 35
+    waste_penalty: 4
+
+news:
+  delay_causes:
+    - a port strike
+    - a fire at a manufacturing plant
+    - a customs backlog
+    - a shortage of raw materials
+    - a truck drivers' strike
+  cold_chain_delay_causes:
+    - a strike at the cold-chain carrier
+    - a breakdown of refrigerated transport
+  surge_causes:
+    paracetamol: an early flu season
+    hydroxychloroquine: a new epidemic wave
+  default_surge_cause: an outbreak
+
+tasks:
+  supply_chain_broken:
+    description: >
+      Flat demand; lead times step up for insulin (days 15-25) and then for paracetamol
+      (days 30-40). Build safety stock before each delay, while shelves still look fine.
+    events:
+      - {type: supplier_delay, product: insulin,     start_day: 15, end_day: 25, multiplier: [2.0, 5.0]}
+      - {type: supplier_delay, product: paracetamol, start_day: 30, end_day: 40, multiplier: [2.0, 5.0]}
+
+  flu_season:
+    description: >
+      A flu wave triples paracetamol demand around day 30 while its supplier slows down
+      on days 30-40. Stock up before the peak.
+    events:
+      - {type: demand_wave,    product: paracetamol, peak_day: 30, amplitude: 2.0, width: 10.0}
+      - {type: supplier_delay, product: paracetamol, start_day: 30, end_day: 40, multiplier: [2.0, 5.0]}
+
+  epidemic_two_wave:
+    description: >
+      Two epidemic waves of hydroxychloroquine demand (peaks on days 17 and 45, the second
+      larger) with supplier delays, and a mild rise in insulin demand. Do not relax in the
+      trough between the waves.
+    events:
+      - {type: demand_wave,    product: hydroxychloroquine, peak_day: 17, amplitude: 1.8, width: 6.0}
+      - {type: demand_wave,    product: hydroxychloroquine, peak_day: 45, amplitude: 2.5, width: 6.0}
+      - {type: demand_wave,    product: insulin,            peak_day: 20, amplitude: [0.1, 0.2], width: 10}
+      - {type: supplier_delay, product: hydroxychloroquine, start_day: 17, end_day: 27, multiplier: [2.0, 5.0]}
+      - {type: supplier_delay, product: insulin,            start_day: 20, end_day: 30, multiplier: [1.0, 3.0]}

@@ -16,9 +16,11 @@ from models import (
     PharmaAction,
     SKUEpisodeConfig,
     SKUState,
+    StoragePoolState,
 )
 from news import visible_news
 from tasks import compute_step_reward, get_task_config
+from world import World, load_world
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ class PharmaEnvironment(Environment):
         task_name: Optional[str] = None,
         news: int = 0,
         scenario: str = "fixed",
+        world: Optional[Union[World, Dict[str, Any], str]] = None,
         **kwargs: Any,
     ) -> InventoryState:
         """
@@ -64,10 +67,16 @@ class PharmaEnvironment(Environment):
 
         The episode is chosen, in order of precedence, from:
           - episode_config: an EpisodeConfig or its dict form (as sent over HTTP/WS)
-          - task_name:      a key of tasks.TASK_REGISTRY, built with `seed`, the
-                            news level `news` (0 none, 1 exact, 2 varied; see news.py)
-                            and `scenario` ("fixed" tasks or "random" SKUs and days)
+          - task_name:      a task of `world`, built with `seed`, the news level
+                            `news` (0 none, 1 exact, 2 varied; see news.py) and
+                            `scenario` ("fixed" tasks or "random" SKUs and days)
+          - world alone:    the world's first task, built the same way
           - the built-in default config
+
+        world: a World, its dict form (as sent over HTTP/WS) or a built-in world's
+        name; default the built-in pharma world (worlds/pharma.yaml). File paths are
+        not accepted here, since reset() can be called over the network: load a file
+        with world.load_world() and pass the World.
         """
         self._rng = Random(seed)
         self._episode_id = episode_id or str(uuid.uuid4())
@@ -75,8 +84,11 @@ class PharmaEnvironment(Environment):
         self._open_orders = []
         if episode_config is not None:
             self._episode_config = EpisodeConfig.model_validate(episode_config)
-        elif task_name is not None:
-            self._episode_config = get_task_config(task_name, seed, news=news, scenario=scenario)
+        elif task_name is not None or world is not None:
+            world_obj = load_world(world, allow_files=False) if world is not None else None
+            if task_name is None:
+                task_name = world_obj.task_names[0]
+            self._episode_config = get_task_config(task_name, seed, news=news, scenario=scenario, world=world_obj)
         else:
             self._episode_config = self._default_episode_config()
         self._draw_world_noise()
@@ -118,6 +130,7 @@ class PharmaEnvironment(Environment):
             sku_id: SKUState(
                 sku_id=sku_id,
                 cold_storage_required=sku_cfg.cold_storage_required,
+                storage_pool=sku_cfg.storage_pool,
                 stockout_penalty=sku_cfg.stockout_penalty,
                 waste_penalty=sku_cfg.waste_penalty,
                 inventory_on_hand= cfg.initial_inventory.get(sku_id,0.0),
@@ -125,19 +138,21 @@ class PharmaEnvironment(Environment):
             for sku_id, sku_cfg in cfg.skus.items()
         }
 
-        cold_used = sum(s.inventory_on_hand for s in skus.values() if s.cold_storage_required)
-        ambient_used = sum(s.inventory_on_hand for s in skus.values() if not s.cold_storage_required)
-
-        return InventoryState(
+        state = InventoryState(
             current_date=0,
+            storage={
+                name: StoragePoolState(total_capacity=pool.capacity, cold_chain=pool.cold_chain)
+                for name, pool in cfg.storage_pools.items()
+            },
             cold_storage_total_capacity=cfg.cold_storage_total_capacity,
-            cold_storage_current_capacity=cold_used,
             ambient_storage_total_capacity=cfg.ambient_storage_total_capacity,
-            ambient_storage_current_capacity=ambient_used,
             skus=skus,
+            context=cfg.context,
             demand_history={sku_id: [] for sku_id in cfg.skus.keys()},
             lead_time_history={sku_id: [] for sku_id in cfg.skus.keys()},
         )
+        self._recompute_storage(state)
+        return state
 
     # -----------------------------------------------------------------------
     # Step
@@ -221,14 +236,12 @@ class PharmaEnvironment(Environment):
         for sku_id, qty, _, _ in arriving:
             arriving_qty[sku_id] = arriving_qty.get(sku_id, 0.0) + qty
 
-        cold_remaining = ts.cold_storage_total_capacity - ts.cold_storage_current_capacity
-        ambient_remaining = ts.ambient_storage_total_capacity - ts.ambient_storage_current_capacity
+        remaining = {name: pool.total_capacity - pool.current_capacity for name, pool in ts.storage.items()}
         avg_demands = {sku_id: ts.skus[sku_id].avg_demand_per_day for sku_id in ts.skus}
 
         accepted, wasted = self._handle_inbound_overflow(
             list(arriving_qty.items()),
-            cold_remaining,
-            ambient_remaining,
+            remaining,
             avg_demands,
         )
 
@@ -304,30 +317,25 @@ class PharmaEnvironment(Environment):
     def _handle_inbound_overflow(
         self,
         arriving_orders: List[Tuple[str, float]],
-        cold_remaining: float,
-        ambient_remaining: float,
+        remaining_capacity: Dict[str, float],
         avg_demand_per_day: Dict[str, float],
     ) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Allocates arriving inbound to inventory using demand-ratio proportional allocation.
         Returns (accepted_qty_per_sku, wasted_qty_per_sku).
-        Handles cold and ambient pools independently.
+        Each storage pool is handled on its own, with its free capacity in
+        remaining_capacity (pool name -> units), in the episode's pool order.
         """
         ts = self._inventory_state
-
-        cold_orders = [
-            (sku_id, qty) for sku_id, qty in arriving_orders
-            if ts.skus[sku_id].cold_storage_required
-        ]
-        ambient_orders = [
-            (sku_id, qty) for sku_id, qty in arriving_orders
-            if not ts.skus[sku_id].cold_storage_required
-        ]
 
         accepted: Dict[str, float] = {}
         wasted: Dict[str, float] = {}
 
-        for pool_orders, capacity in [(cold_orders, cold_remaining), (ambient_orders, ambient_remaining)]:
+        for pool_name, capacity in remaining_capacity.items():
+            pool_orders = [
+                (sku_id, qty) for sku_id, qty in arriving_orders
+                if ts.skus[sku_id].storage_pool == pool_name
+            ]
             pool_accepted, pool_wasted = self._allocate_pool(pool_orders, capacity, avg_demand_per_day)
             accepted.update(pool_accepted)
             wasted.update(pool_wasted)
@@ -488,8 +496,13 @@ class PharmaEnvironment(Environment):
     # Storage recompute
     # -----------------------------------------------------------------------
 
-    def _recompute_storage(self) -> None:
-        ts = self._inventory_state
+    def _recompute_storage(self, state: Optional[InventoryState] = None) -> None:
+        """Units held per pool, and the cold-chain and ambient totals, from the SKUs' stock."""
+        ts = state if state is not None else self._inventory_state
+        for name, pool in ts.storage.items():
+            pool.current_capacity = sum(
+                s.inventory_on_hand for s in ts.skus.values() if s.storage_pool == name
+            )
         ts.cold_storage_current_capacity = sum(
             s.inventory_on_hand for s in ts.skus.values() if s.cold_storage_required
         )
@@ -520,7 +533,7 @@ class PharmaEnvironment(Environment):
             return inference.SYSTEM_PROMPT + "\n\nNo state available. Call reset() first."
         report = inference.observation_to_dict(self._inventory_state)
         user_prompt = inference.build_user_prompt(report, [], step=self._inventory_state.current_date + 1)
-        return inference.SYSTEM_PROMPT + "\n\n" + user_prompt
+        return inference.system_prompt("units", self._inventory_state) + "\n\n" + user_prompt
 
     # -----------------------------------------------------------------------
     # Default episode config

@@ -167,6 +167,168 @@ class NewsRuleAgent(Agent):
         return json.dumps(baseline_policy(obs, extra_days=news_extra_days(obs, self._events))), None
 
 
+# How far ahead news_plan_orders looks for the earliest arrival of a later order. Longer
+# than any lead time a delay can produce (the longest normal lead time x the largest multiplier).
+PLAN_LOOKAHEAD_DAYS = 60
+
+
+def news_plan_targets(
+    obs: InventoryState,
+    events: List[Any],
+    normal_lead_time: Dict[str, float],
+    safety_days: float = 3.0,
+) -> Dict[str, float]:
+    """
+    Target stock position (units on hand plus inbound) for every SKU with a news event
+    published so far (announce_day <= today), from an inventory plan that uses the
+    events' fields and the observation only. SKUs without news are not in the result.
+
+    The plan replaces the baseline's two estimates, which only react after a disruption
+    shows:
+
+    lead time    An order placed on day d takes normal_lead_time x the multiplier of a
+                 published supplier_delay covering d (1 outside delays). Stock must last
+                 until the first later order can arrive: the cover period is the earliest
+                 arrival of any order placed from tomorrow on, counted from tomorrow.
+                 Before a delay that is the normal lead time; just before and during one
+                 it stretches to the delay's end or the slow lead time, whichever is sooner.
+    demand       Normal daily demand is estimated from past sales, each day divided by the
+                 demand multiple the published surges give that day (_surge_profile). The
+                 forecast for a coming day is normal demand x that day's multiple, so it
+                 rises ahead of a wave and falls after its peak.
+
+    target = forecast demand over the cover period + safety_days, capped at the SKU's
+    share of its storage pool (by normal demand) plus what is consumed while today's
+    order travels, so the plan does not order what storage cannot hold.
+    Without news the cover period is the lead time, so the target is the baseline's.
+    """
+    today = obs.current_date
+    published = [e for e in events if e.announce_day <= today and e.sku_id in obs.skus]
+    with_news = {e.sku_id for e in published}
+
+    def multiple(sku_id: str, day: int) -> float:
+        """Demand on `day` as a multiple of normal, from the published surges."""
+        value = 1.0
+        for e in published:
+            if e.sku_id == sku_id and e.kind == "demand_surge":
+                value *= _surge_profile(e, day)
+        return value
+
+    def normal_demand(sku_id: str) -> float:
+        """Past sales with the published surges divided out; the baseline's estimate if no sales yet."""
+        history = obs.demand_history.get(sku_id, [])
+        if not history:
+            sku = obs.skus[sku_id]
+            return max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
+        return sum(sold / multiple(sku_id, day) for day, sold in enumerate(history)) / len(history)
+
+    normal = {sku_id: normal_demand(sku_id) for sku_id in obs.skus}
+
+    targets: Dict[str, float] = {}
+    for sku_id in sorted(with_news, key=list(obs.skus).index):
+        sku = obs.skus[sku_id]
+        demand = normal[sku_id]
+        if demand <= 0:
+            continue
+        delays = [e for e in published if e.sku_id == sku_id and e.kind == "supplier_delay"]
+
+        def lead_time(day: int) -> float:
+            slow = [e.multiplier for e in delays if e.start_day <= day <= e.end_day]
+            return normal_lead_time.get(sku_id, sku.avg_lead_time) * max(slow, default=1.0)
+
+        tomorrow = today + 1
+        cover = min(day + lead_time(day) for day in range(tomorrow, tomorrow + PLAN_LOOKAHEAD_DAYS)) - tomorrow
+        horizon = cover + safety_days
+        whole = int(horizon)
+        target = demand * (sum(multiple(sku_id, today + k) for k in range(whole))
+                           + (horizon - whole) * multiple(sku_id, today + whole))
+
+        pool = obs.storage.get(sku.storage_pool)
+        if pool is not None:
+            pool_demand = sum(normal[k] for k, s in obs.skus.items() if s.storage_pool == sku.storage_pool)
+            in_transit = demand * multiple(sku_id, today) * lead_time(today)
+            target = min(target, pool.total_capacity * demand / pool_demand + in_transit)
+        targets[sku_id] = target
+    return targets
+
+
+def news_plan_orders(
+    obs: InventoryState,
+    events: List[Any],
+    normal_lead_time: Dict[str, float],
+    safety_days: float = 3.0,
+) -> Dict[str, float]:
+    """
+    Orders of the news plan: each SKU with published news is ordered up to its
+    news_plan_targets() target, and every other SKU exactly as baseline_policy orders it.
+    """
+    targets = news_plan_targets(obs, events, normal_lead_time, safety_days)
+    orders = {k: q for k, q in baseline_policy(obs, safety_days=safety_days).items() if k not in targets}
+    inbound: Dict[str, float] = {}
+    for sku_id, qty, _ in obs.expected_inbound_orders:
+        inbound[sku_id] = inbound.get(sku_id, 0.0) + qty
+    for sku_id, target in targets.items():
+        shortfall = target - obs.skus[sku_id].inventory_on_hand - inbound.get(sku_id, 0.0)
+        if shortfall >= 1:
+            orders[sku_id] = round(shortfall)
+    return orders
+
+
+def news_plan_adjust_days(
+    obs: InventoryState,
+    events: List[Any],
+    normal_lead_time: Dict[str, float],
+    safety_days: float = 3.0,
+) -> Dict[str, int]:
+    """
+    The news plan as an answer in the `adjust` format: for every SKU, the whole number
+    of extra days (within inference.ADJUST_DAYS_RANGE) that brings the baseline's
+    order-up-to level closest to the plan's target. The baseline orders up to
+    recent demand x (lead time + safety_days + extra), so
+
+        extra = target / recent demand - lead time - safety_days
+
+    SKUs without published news, and SKUs with no demand seen yet, get 0. Where the plan
+    wants less than the baseline (demand falling after a peak) the answer is 0, the
+    lowest the format allows.
+    """
+    low, high = inference.ADJUST_DAYS_RANGE
+    answer = {sku_id: 0 for sku_id in obs.skus}
+    for sku_id, target in news_plan_targets(obs, events, normal_lead_time, safety_days).items():
+        sku = obs.skus[sku_id]
+        demand = max(sku.avg_demand_last_5_days, sku.avg_demand_per_day)
+        if demand <= 0:
+            continue
+        extra = target / demand - baseline_lead_time(sku) - safety_days
+        answer[sku_id] = int(min(max(round(extra), low), high))
+    return answer
+
+
+class NewsPlanAgent(Agent):
+    """
+    news_plan_orders() on the exact event behind each published news item: an inventory
+    plan (cover period, demand forecast, storage cap) instead of the baseline plus extra
+    days. Like NewsRuleAgent it reads the structured events, not the text, so it is a
+    reference for what the news is worth, and it earns clearly more of it. Without news
+    it plays exactly like the baseline.
+    """
+
+    def __init__(self) -> None:
+        self._events: List[Any] = []
+        self._normal_lead_time: Dict[str, float] = {}
+
+    def start_episode(self, env: Any) -> None:
+        self._events = list(env._episode_config.news)
+        self._normal_lead_time = {}
+
+    def act(self, obs: InventoryState, history: History) -> Tuple[str, Optional[str]]:
+        # Before any delivery the report's avg_lead_time is the supplier's normal lead
+        # time; later it mixes in delayed deliveries, so keep the first one seen.
+        for sku_id, sku in obs.skus.items():
+            self._normal_lead_time.setdefault(sku_id, sku.avg_lead_time)
+        return json.dumps(news_plan_orders(obs, self._events, self._normal_lead_time)), None
+
+
 class NewsLLMAgent(Agent):
     """
     The hybrid: the baseline does the arithmetic, and an LLM reads the news text and
@@ -197,7 +359,7 @@ class NewsLLMAgent(Agent):
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": inference.NEWS_SYSTEM_PROMPT},
+                    {"role": "system", "content": inference.news_system_prompt(obs)},
                     {"role": "user", "content": inference.build_news_prompt(obs)},
                 ],
                 temperature=inference.TEMPERATURE,
@@ -312,7 +474,7 @@ class LLMAgent(Agent):
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": inference.system_prompt(self.action)},
+                    {"role": "system", "content": inference.system_prompt(self.action, obs)},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=inference.TEMPERATURE,
