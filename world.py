@@ -15,7 +15,7 @@ Numbers and ranges
 ------------------
 Any amount can be a single number or a range [low, high]. A range is drawn uniformly
 once per episode from the seed, so the same seed always builds the same episode. Days
-(peak_day, start_day, end_day) are whole numbers counted from 0.
+(peak_day, start_day, end_day) are whole numbers counted from 0, and may be ranges too.
 
 Draw order (what makes a seed reproducible): first every event of the task, in the
 order listed, drawing its ranges in field order (supplier_delay: multiplier;
@@ -32,6 +32,30 @@ Events
     demand_step     demand is `multiplier` x normal on days start_day..end_day
                     (a promotion above 1, a closure below 1).
 Demand events on the same product multiply together, so two waves make two peaks.
+
+Where and when: drawn per seed
+------------------------------
+A task with fixed products and days disrupts the same product on the same days in
+every episode, so a fixed timetable can stand in for understanding. To make every seed
+a different episode, let the task draw them:
+
+    draw:                                # products drawn per seed, by a name you choose
+      struck: any                        #   any product of the world
+      popular: [ice_cream, biscuits]     #   or one of a list
+    events:
+      - {type: supplier_delay, product: struck, start_day: [8, 25], duration: [8, 12], ...}
+      - {type: demand_wave,    product: popular, peak_day: [18, 34], ...}
+
+    draw          events name a draw as their product. Two events with the same name hit
+                  the same product; different names always get different products.
+    day ranges    start_day, end_day and peak_day may be [low, high].
+    duration      days the event lasts, instead of end_day: a number or a range.
+    storage_days  capacity_days for this task only, per pool (e.g. `shelf: 14`): with
+                  less room, keeping extra stock of everything stops being free.
+
+Products and days are drawn from a second generator, so a task and a copy of it with
+ranges have the same demand, lead times and event sizes for a seed. News follows
+whatever was drawn.
 
 Words
 -----
@@ -116,6 +140,45 @@ def draw(rng: Random, amount: Amount) -> float:
     return amount
 
 
+Day = Union[int, Tuple[int, int]]
+ANY_PRODUCT = "any"     # in a task's `draw`: any product of the world
+
+
+def _check_day(value: Any, *, minimum: int = 0) -> Day:
+    """A whole number of days, or a [low, high] range of them with low <= high; each at least `minimum`."""
+    def whole(v: Any) -> int:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v:
+            raise ValueError("days must be whole numbers, or a [low, high] range of them")
+        return int(v)
+
+    if isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise ValueError("a range must be [low, high]")
+        low, high = whole(value[0]), whole(value[1])
+        if low > high:
+            raise ValueError(f"range [{low}, {high}] has low > high")
+        result: Day = (low, high)
+    else:
+        low = high = whole(value)
+        result = low
+    if low < minimum:
+        raise ValueError(f"must be {minimum} or more")
+    return result
+
+
+def _low(day: Day) -> int:
+    return day[0] if isinstance(day, tuple) else day
+
+
+def _high(day: Day) -> int:
+    return day[1] if isinstance(day, tuple) else day
+
+
+def draw_day(rng: Random, day: Day) -> int:
+    """A fixed day as is; a range drawn uniformly, both ends included (one draw from rng)."""
+    return rng.randint(*day) if isinstance(day, tuple) else day
+
+
 class _Strict(BaseModel):
     # Unknown keys are errors: a typo in a world file must not be silently ignored.
     model_config = ConfigDict(extra="forbid")
@@ -165,11 +228,50 @@ class Product(_Strict):
         return _check_amount(v, non_negative=True)
 
 
-class SupplierDelay(_Strict):
-    type: Literal["supplier_delay"]
+class _Window(_Strict):
+    """An event that lasts from start_day to end_day; give end_day, or duration (days it lasts)."""
+
     product: str
-    start_day: int = Field(ge=0)
-    end_day: int = Field(ge=0)
+    start_day: Any = Field(description="First day: a day or a [low, high] range drawn per seed.")
+    end_day: Optional[Any] = Field(default=None, description="Last day: a day or a [low, high] range.")
+    duration: Optional[Any] = Field(
+        default=None, description="Days the event lasts, instead of end_day: a number or a [low, high] range.",
+    )
+
+    @field_validator("start_day", "end_day")
+    @classmethod
+    def _day(cls, v: Any) -> Optional[Day]:
+        return None if v is None else _check_day(v)
+
+    @field_validator("duration")
+    @classmethod
+    def _length(cls, v: Any) -> Optional[Day]:
+        return None if v is None else _check_day(v, minimum=1)
+
+    @model_validator(mode="after")
+    def _days(self) -> "_Window":
+        if (self.end_day is None) == (self.duration is None):
+            raise ValueError("give exactly one of end_day and duration")
+        if self.end_day is not None and _high(self.start_day) > _low(self.end_day):
+            raise ValueError("start_day must not be after end_day")
+        return self
+
+    def latest_day(self) -> int:
+        """The last day the event can reach."""
+        if self.end_day is not None:
+            return _high(self.end_day)
+        return _high(self.start_day) + _high(self.duration) - 1
+
+    def window(self, layout: Random) -> Tuple[int, int]:
+        """(first day, last day), drawing any ranges from `layout`: the start, then the end or the duration."""
+        first = draw_day(layout, self.start_day)
+        if self.end_day is not None:
+            return first, draw_day(layout, self.end_day)
+        return first, first + draw_day(layout, self.duration) - 1
+
+
+class SupplierDelay(_Window):
+    type: Literal["supplier_delay"]
     multiplier: Any = Field(description="Lead time x this, e.g. [2, 5].")
 
     @field_validator("multiplier")
@@ -177,19 +279,18 @@ class SupplierDelay(_Strict):
     def _positive(cls, v: Any) -> Amount:
         return _check_amount(v, positive=True)
 
-    @model_validator(mode="after")
-    def _days(self) -> SupplierDelay:
-        if self.start_day > self.end_day:
-            raise ValueError("start_day must not be after end_day")
-        return self
-
 
 class DemandWave(_Strict):
     type: Literal["demand_wave"]
     product: str
-    peak_day: int = Field(ge=0)
+    peak_day: Any = Field(description="Day of the peak: a day or a [low, high] range drawn per seed.")
     amplitude: Any = Field(description="Extra demand at the peak: 2 means 3x normal.")
     width: Any = Field(description="Days from the peak to where the wave has fallen by about 40%.")
+
+    @field_validator("peak_day")
+    @classmethod
+    def _day(cls, v: Any) -> Day:
+        return _check_day(v)
 
     @field_validator("amplitude")
     @classmethod
@@ -201,12 +302,12 @@ class DemandWave(_Strict):
     def _positive(cls, v: Any) -> Amount:
         return _check_amount(v, positive=True)
 
+    def latest_day(self) -> int:
+        return _high(self.peak_day)
 
-class DemandStep(_Strict):
+
+class DemandStep(_Window):
     type: Literal["demand_step"]
-    product: str
-    start_day: int = Field(ge=0)
-    end_day: int = Field(ge=0)
     multiplier: Any = Field(description="Demand x this on the days of the step.")
 
     @field_validator("multiplier")
@@ -214,18 +315,23 @@ class DemandStep(_Strict):
     def _non_negative(cls, v: Any) -> Amount:
         return _check_amount(v, non_negative=True)
 
-    @model_validator(mode="after")
-    def _days(self) -> DemandStep:
-        if self.start_day > self.end_day:
-            raise ValueError("start_day must not be after end_day")
-        return self
-
 
 Event = Annotated[Union[SupplierDelay, DemandWave, DemandStep], Field(discriminator="type")]
 
 
 class Task(_Strict):
     description: str = ""
+    draw: Dict[str, Union[Literal["any"], List[str]]] = Field(
+        default_factory=dict,
+        description=(
+            "Products drawn per seed, by name: 'any' (any product) or a list to choose from. An event "
+            "names one as its product. Different names always get different products."
+        ),
+    )
+    storage_days: Dict[str, float] = Field(
+        default_factory=dict,
+        description="capacity_days for this task only, per storage pool (e.g. tighter storage).",
+    )
     events: List[Event] = Field(default_factory=list)
 
 
@@ -274,13 +380,33 @@ class World(_Strict):
                 if seen.setdefault(label, sku_id) != sku_id:
                     raise ValueError(f"'{label}' names both product '{seen[label]}' and product '{sku_id}' "
                                      "(ids, names and aliases must be unique)")
+        if ANY_PRODUCT in self.products:
+            raise ValueError(f"a product cannot be called '{ANY_PRODUCT}': in a task's draw it means any product")
         for task_name, task in self.tasks.items():
+            for position, (name, choices) in enumerate(task.draw.items()):
+                where = f"task '{task_name}', draw '{name}'"
+                if name in self.products:
+                    raise ValueError(f"{where}: a draw cannot have the name of a product")
+                candidates = list(self.products) if choices == ANY_PRODUCT else choices
+                unknown = [c for c in candidates if c not in self.products]
+                if unknown:
+                    raise ValueError(f"{where}: unknown product(s) {unknown} (products: {sorted(self.products)})")
+                # Earlier draws may have taken up to `position` of these products.
+                if len(set(candidates)) <= position:
+                    raise ValueError(f"{where}: {len(set(candidates))} product(s) to choose from, but "
+                                     f"{position} may already be taken by the draws before it")
+            for pool, capacity_days in task.storage_days.items():
+                if pool not in self.storage:
+                    raise ValueError(f"task '{task_name}': storage_days names unknown storage pool '{pool}' "
+                                     f"(storage pools: {sorted(self.storage)})")
+                if capacity_days <= 0:
+                    raise ValueError(f"task '{task_name}': storage_days for '{pool}' must be greater than 0")
             for i, event in enumerate(task.events):
                 where = f"task '{task_name}', event {i + 1} ({event.type})"
-                if event.product not in self.products:
+                if event.product not in self.products and event.product not in task.draw:
                     raise ValueError(f"{where}: unknown product '{event.product}' "
-                                     f"(products: {sorted(self.products)})")
-                last = getattr(event, "end_day", getattr(event, "peak_day", 0))
+                                     f"(products: {sorted(self.products)}; draws: {sorted(task.draw)})")
+                last = event.latest_day()
                 if last >= self.days:
                     raise ValueError(f"{where}: day {last} is past the end of the episode "
                                      f"(days 0 to {self.days - 1})")
@@ -409,27 +535,40 @@ def build_episode(world: World, task_name: str, seed: Optional[int] = None) -> E
     except KeyError:
         raise WorldError(f"world '{world.name}' has no task '{task_name}' (tasks: {world.task_names})") from None
     rng = Random(seed)
+    # Where and when events happen (drawn products, day ranges) has its own generator, so
+    # a task and a copy of it with ranges share every other value of a seed.
+    layout = Random(f"layout|{world.name}|{task_name}|{seed}") if seed is not None else Random()
     days = world.days
+
+    # 0. Drawn products, in order; a product already drawn is not drawn again.
+    drawn: Dict[str, str] = {}
+    for name, choices in task.draw.items():
+        candidates = [p for p in (world.products if choices == ANY_PRODUCT else choices) if p not in drawn.values()]
+        drawn[name] = layout.choice(list(dict.fromkeys(candidates)))
 
     # 1. Events, in order. Curves start flat; demand events multiply, delays overwrite.
     demand: Dict[str, List[float]] = {}
     lead: Dict[str, List[float]] = {}
     for event in task.events:
+        product = drawn.get(event.product, event.product)
         if isinstance(event, SupplierDelay):
+            first, last = event.window(layout)
             m = draw(rng, event.multiplier)
-            curve = lead.setdefault(event.product, [1.0] * days)
-            for day in range(event.start_day, event.end_day + 1):
+            curve = lead.setdefault(product, [1.0] * days)
+            for day in range(first, last + 1):
                 curve[day] = m
         elif isinstance(event, DemandWave):
+            peak = draw_day(layout, event.peak_day)
             amplitude = draw(rng, event.amplitude)
             width = draw(rng, event.width)
-            wave = wave_curve(event.peak_day, amplitude, width, days)
-            previous = demand.get(event.product)
-            demand[event.product] = wave if previous is None else [a * b for a, b in zip(previous, wave)]
+            wave = wave_curve(peak, amplitude, width, days)
+            previous = demand.get(product)
+            demand[product] = wave if previous is None else [a * b for a, b in zip(previous, wave)]
         else:  # DemandStep
+            first, last = event.window(layout)
             m = draw(rng, event.multiplier)
-            curve = demand.setdefault(event.product, [1.0] * days)
-            for day in range(event.start_day, event.end_day + 1):
+            curve = demand.setdefault(product, [1.0] * days)
+            for day in range(first, last + 1):
                 curve[day] *= m
 
     # 2. Products, in order.
@@ -458,7 +597,8 @@ def build_episode(world: World, task_name: str, seed: Optional[int] = None) -> E
     storage_pools: Dict[str, StoragePoolConfig] = {}
     for pool_name, pool in world.storage.items():
         pool_demand = sum(skus[s].base_demand for s, p in world.products.items() if p.storage == pool_name)
-        storage_pools[pool_name] = StoragePoolConfig(capacity=max(pool.capacity_days * pool_demand, 1.0),
+        capacity_days = task.storage_days.get(pool_name, pool.capacity_days)
+        storage_pools[pool_name] = StoragePoolConfig(capacity=max(capacity_days * pool_demand, 1.0),
                                                      cold_chain=pool.cold_chain)
 
     # The built-in pharma world keeps the original prompt and news wording (context None),

@@ -99,3 +99,18 @@ tasks:
     events:
       - {type: supplier_delay, product: rice, start_day: 15, end_day: 24, multiplier: [2, 4]}
       - {type: supplier_delay, product: milk, start_day: 15, end_day: 24, multiplier: [2, 3]}
+
+  # A task whose place and time are drawn per seed: every seed is a different episode,
+  # so no fixed timetable works and the news has to be read.
+  surprise_disruptions:
+    description: >
+      A delivery strike hits one product and demand for another rises, both drawn per
+      seed and at days drawn per seed, with a smaller dry shelf.
+    draw:
+      struck: any                       # any product; a different one for each name
+      popular: [ice_cream, biscuits, milk]
+    storage_days:
+      shelf: 14                         # instead of the world's 21
+    events:
+      - {type: supplier_delay, product: struck,  start_day: [8, 25], duration: [8, 12], multiplier: [2, 4]}
+      - {type: demand_wave,    product: popular, peak_day: [18, 34], amplitude: [1.0, 2.0], width: [4, 6]}

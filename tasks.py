@@ -318,8 +318,9 @@ def get_task_config(
     if scenario == "fixed":
         config = build_episode(world, task_name, seed)
     elif world != PHARMA_WORLD or task_name not in TASK_REGISTRY:
-        raise WorldError(f"scenario='random' is only available for the built-in pharma world, "
-                         f"not world '{world.name}'; use scenario='fixed'")
+        raise WorldError(f"scenario='random' is only available for the built-in pharma world, not world "
+                         f"'{world.name}'. In a world file, a task draws its own products and days per seed: "
+                         "give it `draw` names and day ranges (see world.py), and use scenario='fixed'")
     else:
         config = TASK_REGISTRY[task_name](seed, scenario=scenario)
     return add_news(config, news, seed)

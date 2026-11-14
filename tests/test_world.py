@@ -64,7 +64,8 @@ def test_catalogue_comes_from_the_world_file():
 
 def test_grocery_example_builds_every_task():
     world = load_world(GROCERY)
-    assert world.name == "grocery" and world.task_names == ["normal_weeks", "holiday_rush", "delivery_strike"]
+    assert world.name == "grocery"
+    assert world.task_names == ["normal_weeks", "holiday_rush", "delivery_strike", "surprise_disruptions"]
     for task in world.task_names:
         config = build_episode(world, task, 7)
         assert config.no_of_days == 45 and sorted(config.skus) == ["biscuits", "ice_cream", "milk", "rice", "yogurt"]
@@ -210,8 +211,9 @@ def test_unknown_task_and_random_scenario_are_refused():
         build_episode(world, "flu_season", 0)
     with pytest.raises(ValueError, match="Unknown task 'flu_season' in world 'grocery'"):
         get_task_config("flu_season", 0, world=world)
-    with pytest.raises(WorldError, match="only available for the built-in pharma world"):
+    with pytest.raises(WorldError, match="only available for the built-in pharma world") as info:
         get_task_config("holiday_rush", 0, scenario="random", world=world)
+    assert "day ranges" in str(info.value)                     # says what to do instead
 
 
 def test_event_types_are_exported():
